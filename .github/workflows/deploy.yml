@@ -1,0 +1,31 @@
+name: Deploy to Oracle Cloud
+
+on:
+  push:
+    branches:
+      - main  # Runs this action only when you push to 'main'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Deploy using SSH
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        port: 22
+        script: |
+          # 1. Go to the project folder
+          cd ~/ecommerceV1
+          
+          # 2. Pull the latest code from GitHub
+          git pull origin main
+          
+          # 3. Install any new dependencies (if package.json changed)
+          npm install
+          
+          # 4. Restart the backend
+          pm2 restart backend
