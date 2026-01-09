@@ -1,7 +1,8 @@
-import { cacheAllCategoriesOnStart, cachePopularProductsOnStart } from "./services/products.service.js";
+import { cacheAllCategoriesOnStart, cachePopularProductsOnStart} from "./services/products.service.js";
 import dotenv from "dotenv";
 import app from "./app.js";
 import redisClient from "./config/redis.js";
+import { cacheFilterOptionsOnStart } from "./services/filter.service.js";
 
 dotenv.config();
 
@@ -14,6 +15,7 @@ app.listen(PORT, async () => {
   await redisClient.flushall();
   console.log("Redis is clean.");
 
+  cacheFilterOptionsOnStart();
   cacheAllCategoriesOnStart();
   cachePopularProductsOnStart();
 });
