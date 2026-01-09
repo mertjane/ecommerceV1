@@ -6,7 +6,7 @@ const clearCache = async () => {
 
     // Clear megamenu cache
     console.log("Clearing megamenu cache...");
-    await redisClient.del("megamenu:data");
+    await redisClient.del("wp:menu:primary");
     console.log("✓ Megamenu cache cleared successfully!");
     totalCleared++;
 

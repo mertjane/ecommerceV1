@@ -46,7 +46,7 @@ const groupStoneColours = () => [
   { title: "Beiges & Browns", slug: "beiges-browns", link: null },
   { title: "Creams & Yellows", slug: "creams-yellows", link: null },
   { title: "Blues & Greens", slug: "blues-greens", link: null },
-  { title: "Reds & Pinks", slug: "reds-pinks", link: null },
+  { title: "Pinks & Reds", slug: "pinks-reds", link: null },
   { title: "Multicolors & Patterns", slug: "multicolors-patterns", link: null },
 ];
 

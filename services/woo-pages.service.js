@@ -14,7 +14,7 @@ const fetchPageFromWordPress = async (slug) => {
     // For blog, we fetch posts instead
     if (slug === PAGE_SLUGS.BLOG) {
       const response = await fetch(
-        `${wpUrl}/wp-json/wp/v2/posts?_embed&per_page=100`
+        `${wpUrl}/wp-json/wp/v2/posts?_embed&per_page=12`
       );
 
       if (!response.ok) {

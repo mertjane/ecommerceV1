@@ -2,18 +2,12 @@ import wcApi from "../config/woocommerce.js";
 import redisClient from "../config/redis.js";
 import { buildMeta, transformProducts } from "../utils/transform.js";
 
-// Cache TTL 6 hours
+// Cache TTL 6 hours (for category lookups only)
 const CACHE_TTL = 60 * 60 * 6;
-
-// Generate cache key for search queries
-const getSearchCacheKey = (query) => {
-  const { q = "", category = "", page = 1, per_page = 12 } = query;
-  return `search:q=${q}:category=${category}:page=${page}:per_page=${per_page}`;
-};
 
 /**
  * Search products by name and optionally filter by category
- * Uses Redis cache for fast responses
+ * No caching - direct search for better performance
  */
 export const searchProducts = async (query) => {
   const { q = "", category = "", page = 1, per_page = 12 } = query;
@@ -34,42 +28,63 @@ export const searchProducts = async (query) => {
     };
   }
 
-  const cacheKey = getSearchCacheKey({ q, category, page, per_page });
-
-  // Check Redis cache first
-  const cached = await redisClient.get(cacheKey);
-  if (cached) {
-    console.log("✓ [CACHE HIT] Serving search results from Redis:", cacheKey);
-    return JSON.parse(cached);
-  }
-
-  console.log("✗ [CACHE MISS] Fetching search results from WooCommerce API:", cacheKey);
+  console.log(`[SEARCH] Searching for "${q.trim()}" from WooCommerce API`);
 
   // Build WooCommerce API parameters
-  const params = {
-    search: q.trim(),
-    page: parseInt(page),
-    per_page: parseInt(per_page),
-    status: "publish",
-    orderby: "relevance", // Search relevance ordering
-  };
-
-  // If category is provided, resolve it and add to params
+  let categoryId = null;
   if (category && category.trim()) {
-    const categoryId = await resolveCategoryId(category.trim());
-    if (categoryId) {
-      params.category = categoryId;
-    } else {
+    categoryId = await resolveCategoryId(category.trim());
+    if (!categoryId) {
       console.log(`Category "${category}" not found for search`);
     }
   }
 
   try {
-    // Fetch from WooCommerce
-    const response = await wcApi.get("products", { params });
+    // Fetch from WooCommerce - get first 100 results to filter client-side
+    const wcParams = {
+      search: q.trim(),
+      per_page: 100,
+      status: "publish",
+    };
 
-    const totalPages = parseInt(response.headers["x-wp-totalpages"]) || 0;
-    const totalProducts = parseInt(response.headers["x-wp-total"]) || 0;
+    if (categoryId) {
+      wcParams.category = categoryId;
+    }
+
+    const response = await wcApi.get("products", wcParams);
+
+    const searchTerm = q.trim().toLowerCase();
+
+    // Filter products by name (strict matching)
+    const filteredProducts = response.data.filter(product => {
+      const productName = product.name.toLowerCase();
+      // Check if product name contains the search term
+      return productName.includes(searchTerm);
+    });
+
+    // Sort by relevance: exact match > starts with > contains
+    const sortedProducts = filteredProducts.sort((a, b) => {
+      const aName = a.name.toLowerCase();
+      const bName = b.name.toLowerCase();
+
+      // Exact match wins
+      if (aName === searchTerm) return -1;
+      if (bName === searchTerm) return 1;
+
+      // Starts with search term wins
+      if (aName.startsWith(searchTerm) && !bName.startsWith(searchTerm)) return -1;
+      if (bName.startsWith(searchTerm) && !aName.startsWith(searchTerm)) return 1;
+
+      // Otherwise keep original order
+      return 0;
+    });
+
+    // Apply pagination to filtered results
+    const totalProducts = sortedProducts.length;
+    const totalPages = Math.ceil(totalProducts / parseInt(per_page));
+    const startIndex = (parseInt(page) - 1) * parseInt(per_page);
+    const endIndex = startIndex + parseInt(per_page);
+    const paginatedProducts = sortedProducts.slice(startIndex, endIndex);
 
     const meta = {
       ...buildMeta({ page, per_page, totalPages, totalProducts }),
@@ -77,107 +92,16 @@ export const searchProducts = async (query) => {
       category: category || null,
     };
 
-    const data = transformProducts(response.data);
+    const data = transformProducts(paginatedProducts);
 
     const result = { data, meta };
 
-    // Cache the search results
-    await redisClient.set(cacheKey, JSON.stringify(result), "EX", CACHE_TTL);
-    console.log(`✓ [CACHED] Search results saved to Redis (TTL: ${CACHE_TTL}s):`, cacheKey);
+    console.log(`✓ [SEARCH COMPLETE] Found ${totalProducts} products matching "${q.trim()}"`);
 
     return result;
   } catch (error) {
     console.error("Error searching products:", error.message);
     throw new Error("Failed to search products");
-  }
-};
-
-/**
- * Get search suggestions based on product names
- * Returns quick suggestions with relevance sorting
- */
-export const getSearchSuggestions = async (query) => {
-  const { q = "", limit = 10 } = query;
-
-  if (!q || q.trim().length < 2) {
-    return { products: [], categories: [] };
-  }
-
-  const cacheKey = `search:suggestions:q=${q.trim()}:limit=${limit}`;
-
-  // Check cache
-  const cached = await redisClient.get(cacheKey);
-  if (cached) {
-    console.log("✓ [CACHE HIT] Serving suggestions from Redis:", cacheKey);
-    return JSON.parse(cached);
-  }
-
-  console.log("✗ [CACHE MISS] Fetching suggestions from WooCommerce API:", cacheKey);
-
-  try {
-    // Fetch products matching the search term
-    const response = await wcApi.get("products", {
-      params: {
-        search: q.trim(),
-        per_page: parseInt(limit),
-        status: "publish",
-        orderby: "relevance",
-      },
-    });
-
-    const searchTerm = q.trim().toLowerCase();
-
-    // Sort by relevance: exact match > starts with > contains
-    const sortedProducts = response.data
-      .filter(product => product.name.toLowerCase().includes(searchTerm))
-      .sort((a, b) => {
-        const aName = a.name.toLowerCase();
-        const bName = b.name.toLowerCase();
-
-        // Exact match wins
-        if (aName === searchTerm) return -1;
-        if (bName === searchTerm) return 1;
-
-        // Starts with search term wins
-        if (aName.startsWith(searchTerm) && !bName.startsWith(searchTerm)) return -1;
-        if (bName.startsWith(searchTerm) && !aName.startsWith(searchTerm)) return 1;
-
-        // Otherwise keep original order
-        return 0;
-      })
-      .slice(0, 5)
-      .map((product) => ({
-        id: product.id,
-        name: product.name,
-        slug: product.slug,
-        image: product.images?.[0]?.src || null,
-        price_html: product.price_html,
-      }));
-
-    // Also fetch matching categories
-    const categoriesResponse = await wcApi.get("products/categories", {
-      search: q.trim(),
-      per_page: 3,
-    });
-
-    const suggestions = {
-      products: sortedProducts,
-      categories: categoriesResponse.data.map((cat) => ({
-        id: cat.id,
-        name: cat.name,
-        slug: cat.slug,
-        count: cat.count,
-      })),
-    };
-
-    // Cache suggestions for shorter time (30 minutes)
-    await redisClient.set(cacheKey, JSON.stringify(suggestions), "EX", 1800);
-    console.log("✓ [CACHED] Suggestions saved to Redis");
-
-    return suggestions;
-  } catch (error) {
-    console.error("Error fetching search suggestions:", error.message);
-    throw new Error("Failed to fetch search suggestions");
   }
 };
 

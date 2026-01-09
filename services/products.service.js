@@ -23,7 +23,7 @@ export async function fetchAllCategories() {
     const categories = categoriesJson
       .map((cat) => (cat ? JSON.parse(cat) : null))
       .filter((cat) => cat !== null && cat.name) // Remove empty/bad data
-      // 👇 ADD THIS MAP TO CLEAN THE OUTPUT
+      // ADD THIS MAP TO CLEAN THE OUTPUT
       .map((cat) => ({
         id: cat.id,
         name: cat.name,
@@ -69,6 +69,7 @@ export async function fetchCategoryBySlug(slug) {
   }
 }
 
+// Redis Warming Up 
 export async function cacheAllCategoriesOnStart() {
   try {
     console.log("Warming up Category Cache...");
@@ -77,7 +78,6 @@ export async function cacheAllCategoriesOnStart() {
     const processedIds = new Set();
 
     while (fetching) {
-      // 👇 FIX IS HERE: Remove the "params: { ... }" wrapper. 
       // Pass the object directly for WooCommerce SDK.
       const { data } = await wcApi.get("products/categories", {
         per_page: 100, // Ask for 100 items
@@ -117,6 +117,11 @@ export async function cacheAllCategoriesOnStart() {
   }
 }
 
+/**
+ * 
+ * @param {*} param0 
+ * @returns 
+ */
 export async function fetchSpecialDeals({categoryId, page = 1, perPage = 8}) {
   const params = {
     category: categoryId,
@@ -139,12 +144,14 @@ export async function fetchSpecialDeals({categoryId, page = 1, perPage = 8}) {
 }
 
 
-// Your product fetcher remains the same (keep the _fields optimization!)
-export async function fetchProductsByCategory({ categoryId, page = 1, perPage = 12 }) {
+// Your product fetcher with sorting support
+export async function fetchProductsByCategory({ categoryId, page = 1, perPage = 12, orderby = 'date', order = 'desc' }) {
   const params = {
     category: categoryId,
     per_page: perPage,
     page,
+    orderby,
+    order,
     _fields: 'id,name,slug,permalink,price,regular_price,sale_price,price_html,images,attributes,stock_status'
   };
 
@@ -158,4 +165,59 @@ export async function fetchProductsByCategory({ categoryId, page = 1, perPage = 
     totalProducts,
     totalPages,
   };
+}
+
+/**
+ * GET /wp-json/wc/v3/products?orderby=popularity&order=desc
+ * Goal to get the most popular product 12 of them only with using /utils/transform.js
+ * _fields should be _fields: 'id,name,slug,permalink, price_html,images (only the first image),attributes,stock_status,categories,yoast_head_json'
+ */
+export async function fetchPopularProducts() {
+  const cacheKey = "products:popular";
+
+  try {
+    // Check Redis cache first
+    const cachedData = await redisClient.get(cacheKey);
+    if (cachedData) {
+      return JSON.parse(cachedData);
+    }
+
+    // Fetch from WooCommerce if not cached
+    const params = {
+      orderby: 'popularity',
+      order: 'desc',
+      per_page: 12,
+      _fields: 'id,name,slug,permalink,price_html,images,attributes,stock_status,categories,yoast_head_json'
+    };
+
+    const { data } = await wcApi.get("products", params);
+
+    // Transform products and keep only first image
+    const products = transformProducts(data).map(product => ({
+      ...product,
+      images: product.images[0] ? [product.images[0]] : []
+    }));
+
+    // Cache for 24 hours
+    await redisClient.set(cacheKey, JSON.stringify(products), "EX", CACHE_TTL);
+
+    return products;
+  } catch (error) {
+    console.error("Error fetching popular products:", error);
+    throw error;
+  }
+}
+
+/**
+ * Cache popular products on server start
+ * Automatically warms up the cache with 12 most popular products
+ */
+export async function cachePopularProductsOnStart() {
+  try {
+    console.log("Warming up Popular Products Cache...");
+    await fetchPopularProducts();
+    console.log("Popular Products Cache Warmup Complete!");
+  } catch (error) {
+    console.error("Failed to warm up popular products cache:", error.message);
+  }
 }

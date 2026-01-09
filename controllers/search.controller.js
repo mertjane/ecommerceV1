@@ -1,4 +1,4 @@
-import { searchProducts, getSearchSuggestions } from "../services/search.service.js";
+import { searchProducts } from "../services/search.service.js";
 import { successResponse, handleError } from "../utils/response.js";
 
 /**
@@ -36,31 +36,4 @@ export const searchProductsController = async (req, res) => {
   }
 };
 
-/**
- * Controller for getting search suggestions (autocomplete)
- * GET /api/search/suggestions?q=mar&limit=5
- */
-export const getSearchSuggestionsController = async (req, res) => {
-  try {
-    const { q, limit } = req.query;
 
-    // Validate search query
-    if (!q || q.trim().length < 2) {
-      return res.status(400).json({
-        error: "Search query too short",
-        message: "Please provide at least 2 characters for suggestions",
-      });
-    }
-
-    const suggestions = await getSearchSuggestions({ q, limit });
-
-    return successResponse(
-      res,
-      suggestions,
-      "Search suggestions retrieved successfully"
-    );
-  } catch (error) {
-    console.error("Error in getSearchSuggestionsController:", error);
-    return handleError(res, error, "Failed to fetch search suggestions");
-  }
-};

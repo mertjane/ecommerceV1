@@ -1,7 +1,6 @@
 import { Router } from "express";
 import {
-  searchProductsController,
-  getSearchSuggestionsController,
+  searchProductsController
 } from "../controllers/search.controller.js";
 
 const router = Router();
@@ -10,8 +9,5 @@ const router = Router();
 // GET /api/search?q=marble&category=tiles&page=1&per_page=12
 router.get("/", searchProductsController);
 
-// Get search suggestions for autocomplete
-// GET /api/search/suggestions?q=mar&limit=5
-router.get("/suggestions", getSearchSuggestionsController);
 
 export default router;

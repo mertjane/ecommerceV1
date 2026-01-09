@@ -6,8 +6,8 @@ export async function getFilteredProducts(filters) {
 
   return {
     products: transformProducts(wpResponse.products),
-    total: wpResponse.total,
-    pages: wpResponse.pages,
+    totalProducts: wpResponse.total,
+    totalPages: wpResponse.pages,
     page: wpResponse.page,
     per_page: wpResponse.per_page,
   };

@@ -1,4 +1,5 @@
 import { getFilteredProducts, getFilterOptions } from "../services/filter.service.js";
+import { buildMeta } from "../utils/transform.js";
 
 export async function filterProductsController(req, res) {
   try {
@@ -8,11 +9,20 @@ export async function filterProductsController(req, res) {
       per_page: Number(req.query.per_page || 12),
     };
 
-    const data = await getFilteredProducts(filters);
+    const { products, totalProducts, totalPages, page, per_page } = await getFilteredProducts(filters);
+
+    // Build meta in the same format as other endpoints
+    const meta = buildMeta({
+      page,
+      per_page,
+      totalPages,
+      totalProducts
+    });
 
     res.json({
       success: true,
-      data,
+      products,
+      meta,
     });
   } catch (error) {
     console.error(error);

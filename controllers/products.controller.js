@@ -1,4 +1,4 @@
-import { fetchProductsByCategory, fetchCategoryBySlug, fetchAllCategories } from "../services/products.service.js";
+import { fetchProductsByCategory, fetchCategoryBySlug, fetchAllCategories, fetchPopularProducts } from "../services/products.service.js";
 import { buildMeta } from "../utils/transform.js";
 
 /**
@@ -32,9 +32,8 @@ export async function getCategoryProducts(req, res) {
 
     const page = parseInt(req.query.page) || 1;
     const perPage = parseInt(req.query.per_page) || 12;
-
-    // Extract filters from query (exclude page & per_page)
-    const { page: _, per_page: __, } = req.query;
+    const orderby = req.query.orderby || 'date';
+    const order = req.query.order || 'desc';
 
     // Fetch category info from WooCommerce
     const category = await fetchCategoryBySlug(slug);
@@ -42,11 +41,13 @@ export async function getCategoryProducts(req, res) {
       return res.status(404).json({ message: "Category not found" });
     }
 
-    // Fetch products in category
+    // Fetch products in category with sorting
     const { products, totalProducts, totalPages } = await fetchProductsByCategory({
       categoryId: category.id,
       page,
       perPage,
+      orderby,
+      order,
     });
 
     // metabuilder
@@ -69,5 +70,23 @@ export async function getCategoryProducts(req, res) {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ message: "Server error" });
+  }
+}
+
+/**
+ * Controller: Get Popular Products
+ * Route: GET /api/products/popular
+ */
+export async function getPopularProducts(req, res) {
+  try {
+    const products = await fetchPopularProducts();
+
+    return res.json({
+      count: products.length,
+      products
+    });
+  } catch (error) {
+    console.error("Error in getPopularProducts:", error);
+    return res.status(500).json({ message: "Server error fetching popular products" });
   }
 }
