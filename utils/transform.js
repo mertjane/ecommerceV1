@@ -23,10 +23,30 @@ export const transformProducts = (products) => {
     price: product.price,
     regular_price: product.regular_price,
     sale_price: product.sale_price,
-    price_html: (() => {
+    /* price_html: (() => {
       const match = product.price_html?.match(/>(£|\$|&pound;)?\s*([\d.,]+)/);
       return match ? match[2] : "";
+    })(), */
+    // --- 🛠️ FIX STARTS HERE ---
+    price_html: (() => {
+      const rawHtml = product.price_html;
+      if (!rawHtml) return "";
+
+      try {
+        // 1. Strip all HTML tags (convert <span>£10</span> to £10)
+        const cleanText = rawHtml.replace(/<[^>]*>?/gm, '');
+
+        // 2. Find the first number (Supports 10.00, 1,200.00, etc.)
+        // This Regex matches digits, commas, and dots.
+        const match = cleanText.match(/[\d,]+\.?\d*/);
+
+        return match ? match[0] : "";
+      } catch (e) {
+        console.error(`Error parsing price for product ${product.id}`, e);
+        return ""; 
+      }
     })(),
+    // --- 🛠️ FIX ENDS HERE ---
     stock_status: product.stock_status,
     categories: product.categories || [],
     images: product.images || [],

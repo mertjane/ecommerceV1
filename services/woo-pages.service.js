@@ -36,32 +36,57 @@ const fetchPageFromWordPress = async (slug) => {
       }));
     }
 
-    // For regular pages
-    const response = await fetch(
+    // Try to fetch as a page first
+    const pageResponse = await fetch(
       `${wpUrl}/wp-json/wp/v2/pages?slug=${slug}`
     );
 
-    if (!response.ok) {
-      throw new Error(`WordPress API error: ${response.status}`);
+    if (pageResponse.ok) {
+      const pages = await pageResponse.json();
+
+      if (pages && pages.length > 0) {
+        const page = pages[0];
+
+        return {
+          id: page.id,
+          date: page.date,
+          slug: page.slug,
+          link: page.link,
+          title: page.title?.rendered || "",
+          content: page.content?.rendered || "",
+          excerpt: page.excerpt?.rendered || "",
+          og_image: page.yoast_head_json?.og_image || [],
+        };
+      }
     }
 
-    const pages = await response.json();
+    // If not found as a page, try to fetch as a post
+    const postResponse = await fetch(
+      `${wpUrl}/wp-json/wp/v2/posts?slug=${slug}&_embed`
+    );
 
-    if (!pages || pages.length === 0) {
+    if (!postResponse.ok) {
+      throw new Error(`WordPress API error: ${postResponse.status}`);
+    }
+
+    const posts = await postResponse.json();
+
+    if (!posts || posts.length === 0) {
       return null;
     }
 
-    const page = pages[0];
+    const post = posts[0];
 
     return {
-      id: page.id,
-      date: page.date,
-      slug: page.slug,
-      link: page.link,
-      title: page.title?.rendered || "",
-      content: page.content?.rendered || "",
-      excerpt: page.excerpt?.rendered || "",
-      og_image: page.yoast_head_json?.og_image || [],
+      id: post.id,
+      date: post.date,
+      slug: post.slug,
+      link: post.link,
+      title: post.title?.rendered || "",
+      content: post.content?.rendered || "",
+      excerpt: post.excerpt?.rendered || "",
+      og_image: post.yoast_head_json?.og_image || [],
+      categories: post._embedded?.["wp:term"]?.[0]?.map((cat) => cat.name) || [],
     };
   } catch (error) {
     console.error(`Error fetching page ${slug}:`, error.message);

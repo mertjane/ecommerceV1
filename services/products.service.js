@@ -2,7 +2,74 @@ import redisClient from "../config/redis.js";
 import wcApi from "../config/woocommerce.js";
 import { transformProducts } from "../utils/transform.js";
 
+const CACHE_KEY = "products:all_search_data";
 const CACHE_TTL = 60 * 60 * 24; // 24 hours
+
+
+/**
+ * Fetch All Products in Woocommerce and Cache
+ * Strategy: Cache Aside
+ */
+export async function fetchAllProducts() {
+  try {
+    // 1. Check Redis Cache First (Fast Access)
+    // We use .get() because we store the whole array as one JSON string
+    const cachedData = await redisClient.get(CACHE_KEY);
+
+    if (cachedData) {
+      console.log("⚡ Fetching products from Redis Cache...");
+      return JSON.parse(cachedData);
+    }
+
+    // 2. If Cache Miss, Fetch from WooCommerce (Slower, handles pagination)
+    console.log("Cache miss. Fetching from WooCommerce API...");
+    
+    let allProducts = [];
+    let page = 1;
+    let fetching = true;
+
+    // Loop until we get all products (WooCommerce limits per_page to 100 max)
+    while (fetching) {
+      const response = await wcApi.get("products", {
+        per_page: 100, // Max allowed by WC
+        page: page,
+        status: "publish", // Only get active products
+      });
+
+      const products = response.data;
+
+      if (products.length === 0) {
+        fetching = false; // Stop if no products returned
+      } else {
+        allProducts = allProducts.concat(products);
+        page++; // Go to next page
+      }
+    }
+
+    // 3. Transform Data (Keep only what you need for Search)
+    // This reduces RAM usage and Redis storage size significantly
+    const transformedData = transformProducts(allProducts);
+
+    // 4. Save to Redis for next time
+    // 'EX' sets the expiration time in seconds
+    if (transformedData.length > 0) {
+      await redisClient.set(
+        CACHE_KEY, 
+        JSON.stringify(transformedData), 
+        "EX", 
+        CACHE_TTL
+      );
+    }
+
+    console.log(`Cached ${transformedData.length} products.`);
+    return transformedData;
+
+  } catch (error) {
+    console.error("Error in fetchAllProducts:", error);
+    // Fallback: return empty array or throw, depending on your app needs
+    return [];
+  }
+}
 
 
 /**
@@ -144,24 +211,101 @@ export async function fetchSpecialDeals({categoryId, page = 1, perPage = 8}) {
 }
 
 
-// Your product fetcher with sorting support
-export async function fetchProductsByCategory({ categoryId, page = 1, perPage = 12, orderby = 'date', order = 'desc' }) {
-  const params = {
-    category: categoryId,
-    per_page: perPage,
-    page,
-    orderby,
-    order,
-    _fields: 'id,name,slug,permalink,price,regular_price,sale_price,price_html,images,attributes,stock_status'
-  };
+// // Your product fetcher with sorting support
+// export async function fetchProductsByCategory({ categoryId, page = 1, perPage = 12, orderby = 'date', order = 'desc' }) {
+//   const params = {
+//     category: categoryId,
+//     per_page: perPage,
+//     page,
+//     orderby,
+//     order,
+//     _fields: 'id,name,slug,permalink,price,regular_price,sale_price,price_html,images,attributes,stock_status'
+//   };
 
-  const { data, headers } = await wcApi.get("products", params);
+//   const { data, headers } = await wcApi.get("products", params);
 
-  const totalProducts = parseInt(headers["x-wp-total"] || 0);
-  const totalPages = parseInt(headers["x-wp-totalpages"] || 1);
+//   const totalProducts = parseInt(headers["x-wp-total"] || 0);
+//   const totalPages = parseInt(headers["x-wp-totalpages"] || 1);
+
+//   return {
+//     products: transformProducts(data),
+//     totalProducts,
+//     totalPages,
+//   };
+// }
+
+/**
+ * Fetch Products by Category (In-Memory Version)
+ * Complexity: O(n) Filter + O(m log m) Sort
+ */
+export async function fetchProductsByCategory({ 
+  categoryId, 
+  page = 1, 
+  perPage = 12, 
+  orderby = 'date', 
+  order = 'desc' 
+}) {
+  
+  // 1. GET DATA (Instant from Redis/RAM)
+  const allProducts = await fetchAllProducts();
+
+  // 2. FILTER: Linear Search O(n)
+  // Find products where one of their categories matches the requested categoryId
+  const categoryProducts = allProducts.filter(product => {
+    // product.categories is array: [{id: 12, name: '...'}, {id: 45, ...}]
+    // We check if ANY category in the list matches our target ID
+    return product.categories.some(cat => cat.id == categoryId);
+  });
+
+  // 3. SORT: O(m log m)
+  // We need to manually sort because we aren't asking the DB anymore
+  const sortedProducts = categoryProducts.sort((a, b) => {
+    let comparison = 0;
+
+    switch (orderby) {
+      case 'price':
+        // Handle price sorting (parse strings to floats)
+        const priceA = parseFloat(a.price || 0);
+        const priceB = parseFloat(b.price || 0);
+        comparison = priceA - priceB;
+        break;
+        
+      case 'title':
+      case 'name':
+        // Alphabetical sort
+        comparison = a.name.localeCompare(b.name);
+        break;
+        
+      case 'date':
+      default:
+        // Date sort (Newest first is standard)
+        // Convert ISO strings to dates
+        const dateA = new Date(a.date_created);
+        const dateB = new Date(b.date_created);
+        comparison = dateA - dateB;
+        break;
+    }
+
+    // Apply Order (Ascending vs Descending)
+    return order === 'desc' ? comparison * -1 : comparison;
+  });
+
+  // 4. PAGINATION: O(1)
+  // Calculate slice indices
+  const totalProducts = sortedProducts.length;
+  const totalPages = Math.ceil(totalProducts / parseInt(perPage));
+  const startIndex = (parseInt(page) - 1) * parseInt(perPage);
+  const endIndex = startIndex + parseInt(perPage);
+
+  // Get the specific chunk for this page
+  const paginatedProducts = sortedProducts.slice(startIndex, endIndex);
+
+  console.log(`[CATEGORY] Served ${paginatedProducts.length} items from cache for CatID: ${categoryId}`);
 
   return {
-    products: transformProducts(data),
+    // Note: Data is already transformed in fetchAllProducts, 
+    // but if you need specific field filtering, you can map it here.
+    products: paginatedProducts, 
     totalProducts,
     totalPages,
   };
@@ -219,5 +363,77 @@ export async function cachePopularProductsOnStart() {
     console.log("Popular Products Cache Warmup Complete!");
   } catch (error) {
     console.error("Failed to warm up popular products cache:", error.message);
+  }
+}
+
+
+/**
+ * Fetch new arrival products (from last 2 months)
+ * @param {number} page - Page number
+ * @param {number} perPage - Items per page
+ * @returns {Promise<Object>} - Products and metadata
+ * Optimized: Uses In-Memory Cache (Big O Linear Search)
+ */
+/**
+
+ */
+export async function fetchNewArrivals(page = 1, perPage = 12) {
+  try {
+    // 1. GET DATA (Instant from Redis/RAM)
+    const allProducts = await fetchAllProducts();
+
+    // 2. Calculate Date Threshold (2 Months Ago)
+    const twoMonthsAgo = new Date();
+    twoMonthsAgo.setMonth(twoMonthsAgo.getMonth() - 2);
+    
+    // Convert to timestamp for slightly faster comparison in the loop
+    const thresholdTime = twoMonthsAgo.getTime();
+
+    console.log(`[NEW ARRIVALS] Filtering products created after: ${twoMonthsAgo.toISOString()}`);
+
+    // 3. FILTER ALGORITHM: O(n)
+    // Scan all products and keep only those newer than the threshold
+    const recentProducts = allProducts.filter(product => {
+      // Safety check: ensure date exists
+      if (!product.date_created) return false;
+      
+      const productDate = new Date(product.date_created).getTime();
+      return productDate >= thresholdTime;
+    });
+
+    // 4. SORT ALGORITHM: O(m log m)
+    // Sort by Date Descending (Newest first)
+    // Note: If your fetchAllProducts list is NOT guaranteed to be sorted by date, this is necessary.
+    recentProducts.sort((a, b) => {
+      return new Date(b.date_created) - new Date(a.date_created);
+    });
+
+    // 5. PAGINATION: O(1)
+    const totalProducts = recentProducts.length;
+    const totalPages = Math.ceil(totalProducts / parseInt(perPage));
+    const startIndex = (parseInt(page) - 1) * parseInt(perPage);
+    const paginatedProducts = recentProducts.slice(startIndex, startIndex + parseInt(perPage));
+
+    console.log(`[NEW ARRIVALS] Found ${totalProducts} new items. Serving page ${page}.`);
+
+    return {
+      // Data is already transformed in fetchAllProducts
+      products: paginatedProducts,
+      totalProducts,
+      totalPages,
+      page: parseInt(page),
+      per_page: parseInt(perPage),
+    };
+
+  } catch (error) {
+    console.error("Error fetching new arrivals:", error);
+    // Return empty structure on error to prevent frontend crash
+    return {
+      products: [],
+      totalProducts: 0,
+      totalPages: 0,
+      page: parseInt(page),
+      per_page: parseInt(perPage),
+    };
   }
 }

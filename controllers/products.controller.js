@@ -1,5 +1,7 @@
-import { fetchProductsByCategory, fetchCategoryBySlug, fetchAllCategories, fetchPopularProducts } from "../services/products.service.js";
+import { fetchProductsByCategory, fetchCategoryBySlug, fetchAllCategories, fetchPopularProducts, fetchNewArrivals } from "../services/products.service.js";
 import { buildMeta } from "../utils/transform.js";
+
+
 
 /**
  * Controller: Get All Categories
@@ -88,5 +90,34 @@ export async function getPopularProducts(req, res) {
   } catch (error) {
     console.error("Error in getPopularProducts:", error);
     return res.status(500).json({ message: "Server error fetching popular products" });
+  }
+}
+
+/**
+ * Controller: Get New Arrivals
+ * Route: GET /api/products/new-arrivals
+ */
+export async function getNewArrivals(req, res) {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const perPage = parseInt(req.query.per_page) || 12;
+
+    const { products, totalProducts, totalPages, per_page } = await fetchNewArrivals(page, perPage);
+
+    // Build meta
+    const meta = buildMeta({
+      page,
+      per_page,
+      totalPages,
+      totalProducts
+    });
+
+    return res.json({
+      products,
+      meta
+    });
+  } catch (error) {
+    console.error("Error in getNewArrivals:", error);
+    return res.status(500).json({ message: "Server error fetching new arrivals" });
   }
 }

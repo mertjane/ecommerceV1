@@ -1,24 +1,115 @@
 import redisClient from "../config/redis.js";
-import { fetchFilteredProducts, fetchFilterOptions as fetchFilterOptionsFromWP} from "../integrations/wordpress/filter.wp.js";
-import { transformProducts } from "../utils/transform.js";
+import { fetchAllProducts } from "./products.service.js"; // ⚡ FAST: Use the Cache!
+import { fetchFilterOptions as fetchFilterOptionsFromWP } from "../integrations/wordpress/filter.wp.js"; // Keep this for sidebar options only
 
 const CACHE_TTL = 60 * 60 * 24; // 24 hours
 const FILTER_OPTIONS_KEY = "filter:options";
 
-export async function getFilteredProducts(filters) {
-  const wpResponse = await fetchFilteredProducts(filters);
+// Allowed attribute slugs (security whitelist)
+const ALLOWED_FILTERS = ["pa_material", "pa_room-type-usage", "pa_colour", "pa_finish"];
+
+/**
+ * Get Filtered Products (In-Memory Implementation)
+ * Replaces the slow WP API call with O(n) Linear Search
+ */
+export async function getFilteredProducts(queryFilters) {
+  // 1. Load all 500 products from Redis/RAM
+  const allProducts = await fetchAllProducts();
+
+  // 2. Extract special params, leave the rest as attribute filters
+  const { 
+    page = 1, 
+    per_page = 12, 
+    orderby = 'date', 
+    order = 'desc', 
+    ...attributes 
+  } = queryFilters;
+
+  // 3. FILTER LOGIC: Check every product against the filters
+  const filteredProducts = allProducts.filter((product) => {
+    
+    // Iterate through every filter passed in the URL (e.g., pa_colour=black,white)
+    return Object.entries(attributes).every(([filterKey, filterValue]) => {
+      
+      // Ignore params that aren't in our allowed list
+      if (!ALLOWED_FILTERS.includes(filterKey)) return true;
+      if (!filterValue) return true;
+
+      // --- CRITICAL FIX FOR buildQueryString COMPATIBILITY ---
+      // Your frontend sends "black,white" (joined by commas).
+      // We must SPLIT it back into an array: ['black', 'white']
+      const requestedOptions = filterValue.split(',').map(v => v.trim().toLowerCase());
+
+      // Find the matching attribute group in the product
+      const productAttr = product.attributes.find((attr) => attr.slug === filterKey);
+
+      // If product doesn't have this attribute at all, reject it
+      if (!productAttr) return false;
+
+      // Check if ANY of the requested options match the product's options
+      // productAttr.options example: ["Black", "White"]
+      const hasMatch = productAttr.options.some((optionName) => {
+        const normalizedName = optionName.toLowerCase();
+        
+        // 1. Check exact name ("black")
+        if (requestedOptions.includes(normalizedName)) return true;
+
+        // 2. Check slugified name ("black-and-white" matches "Black and White")
+        const slugifiedName = normalizedName.replace(/\s+/g, '-');
+        if (requestedOptions.includes(slugifiedName)) return true;
+
+        return false;
+      });
+
+      return hasMatch;
+    });
+  });
+
+  // 4. SORTING (Since we aren't using WP to sort anymore)
+  const sortedProducts = filteredProducts.sort((a, b) => {
+    let comparison = 0;
+    const getPrice = (p) => parseFloat(p.price || 0);
+
+    switch (orderby) {
+      case 'price':
+        comparison = getPrice(a) - getPrice(b);
+        break;
+      case 'title':
+        comparison = a.name.localeCompare(b.name);
+        break;
+      case 'date':
+      default:
+        const dateA = new Date(a.date_created);
+        const dateB = new Date(b.date_created);
+        comparison = dateA - dateB;
+        break;
+    }
+    return order === 'asc' ? comparison : comparison * -1;
+  });
+
+  // 5. PAGINATION
+  const totalProducts = sortedProducts.length;
+  const totalPages = Math.ceil(totalProducts / parseInt(per_page));
+  const startIndex = (parseInt(page) - 1) * parseInt(per_page);
+  const paginatedProducts = sortedProducts.slice(startIndex, startIndex + parseInt(per_page));
+
+  console.log(`[FILTER] ⚡ Served ${paginatedProducts.length} filtered products from Cache.`);
 
   return {
-    products: transformProducts(wpResponse.products),
-    totalProducts: wpResponse.total,
-    totalPages: wpResponse.pages,
-    page: wpResponse.page,
-    per_page: wpResponse.per_page,
+    products: paginatedProducts, // Already transformed in fetchAllProducts
+    totalProducts: totalProducts,
+    totalPages: totalPages,
+    page: parseInt(page),
+    per_page: parseInt(per_page),
   };
 }
 
+/**
+ * Get Filter Options (Sidebar Facets)
+ * This still uses your WP Integration because these don't change often
+ */
 export async function getFilterOptions() {
-  // 1. Try to get data from Redis first
+  // 1. Try Redis
   try {
     const cachedData = await redisClient.get(FILTER_OPTIONS_KEY);
     if (cachedData) {
@@ -28,11 +119,11 @@ export async function getFilterOptions() {
     console.error("Redis get error:", err);
   }
 
-  // 2. If not in cache (or error), fetch from WordPress API
-  // console.log("Cache miss. Fetching from WP...");
+  // 2. Fallback: Fetch from WP (using your integrations/wordpress/filter.wp.js)
+  // This is okay because it only happens once every 24 hours (due to cache)
   const data = await fetchFilterOptionsFromWP();
 
-  // 3. Save to Redis for next time
+  // 3. Save to Redis
   if (data) {
     try {
       await redisClient.set(FILTER_OPTIONS_KEY, JSON.stringify(data), "EX", CACHE_TTL);
@@ -44,18 +135,10 @@ export async function getFilterOptions() {
   return data;
 }
 
-/**
- * Cache filter options on server start
- * Automatically warms up the cache
- */
 export async function cacheFilterOptionsOnStart() {
   try {
     console.log("Warming up Filter Options Cache...");
-    
-    // We simply call the function we wrote above.
-    // Since cache is empty (due to flushall), this will fetch from API and save to Redis.
     await getFilterOptions();
-    
     console.log("Filter Options Cache Warmup Complete!");
   } catch (error) {
     console.error("Failed to warm up Filter Options cache:", error.message);
