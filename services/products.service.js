@@ -10,16 +10,18 @@ const CACHE_TTL = 60 * 60 * 24; // 24 hours
  * Fetch All Products in Woocommerce and Cache
  * Strategy: Cache Aside
  */
-export async function fetchAllProducts() {
+export async function fetchAllProducts(forceRefresh = false) {
   try {
-    // 1. Check Redis Cache First (Fast Access)
-    // We use .get() because we store the whole array as one JSON string
-    const cachedData = await redisClient.get(CACHE_KEY);
-
-    if (cachedData) {
-      console.log("⚡ Fetching products from Redis Cache...");
-      return JSON.parse(cachedData);
+    // 1. Only return cache if we AREN'T forcing a refresh
+    if(!forceRefresh) {
+      const cachedData = await redisClient.get(CACHE_KEY);
+      if (cachedData) {
+        console.log("Fetching products from Redis Cache...");
+        return JSON.parse(cachedData);
+      }
     }
+
+    console.log("Fetching fresh data from WooCommerce...");
 
     // 2. If Cache Miss, Fetch from WooCommerce (Slower, handles pagination)
     console.log("Cache miss. Fetching from WooCommerce API...");
@@ -59,9 +61,8 @@ export async function fetchAllProducts() {
         "EX", 
         CACHE_TTL
       );
+      console.log(`Cache updated: ${transformedData.length} products stored.`);
     }
-
-    console.log(`Cached ${transformedData.length} products.`);
     return transformedData;
 
   } catch (error) {
@@ -136,10 +137,24 @@ export async function fetchCategoryBySlug(slug) {
   }
 }
 
-// Redis Warming Up 
-export async function cacheAllCategoriesOnStart() {
+
+/**
+ * Redis Warming Up for Categories
+ * @param {boolean} forceRefresh - If true, fetches fresh data even if cache exists
+ */
+export async function cacheAllCategoriesOnStart(forceRefresh = false) {
   try {
-    console.log("Warming up Category Cache...");
+    // 1. If not forcing a refresh, check if we already have categories
+    if (!forceRefresh) {
+      const existingKeys = await redisClient.keys("category:*");
+      if (existingKeys.length > 0) {
+        console.log("⚡ Categories already in cache. Skipping warmup.");
+        return;
+      }
+    }
+
+    console.log("Refreshing Category Cache from WooCommerce...");
+   
     let page = 1;
     let fetching = true;
     const processedIds = new Set();
@@ -174,7 +189,7 @@ export async function cacheAllCategoriesOnStart() {
       });
 
       await pipeline.exec();
-      console.log(`   Cached ${data.length} categories from page ${page}`);
+      console.log(`Cached ${data.length} categories from page ${page}`);
       page++;
     }
     
@@ -210,29 +225,6 @@ export async function fetchSpecialDeals({categoryId, page = 1, perPage = 8}) {
   };
 }
 
-
-// // Your product fetcher with sorting support
-// export async function fetchProductsByCategory({ categoryId, page = 1, perPage = 12, orderby = 'date', order = 'desc' }) {
-//   const params = {
-//     category: categoryId,
-//     per_page: perPage,
-//     page,
-//     orderby,
-//     order,
-//     _fields: 'id,name,slug,permalink,price,regular_price,sale_price,price_html,images,attributes,stock_status'
-//   };
-
-//   const { data, headers } = await wcApi.get("products", params);
-
-//   const totalProducts = parseInt(headers["x-wp-total"] || 0);
-//   const totalPages = parseInt(headers["x-wp-totalpages"] || 1);
-
-//   return {
-//     products: transformProducts(data),
-//     totalProducts,
-//     totalPages,
-//   };
-// }
 
 /**
  * Fetch Products by Category (In-Memory Version)
@@ -316,17 +308,21 @@ export async function fetchProductsByCategory({
  * Goal to get the most popular product 12 of them only with using /utils/transform.js
  * _fields should be _fields: 'id,name,slug,permalink, price_html,images (only the first image),attributes,stock_status,categories,yoast_head_json'
  */
-export async function fetchPopularProducts() {
+export async function fetchPopularProducts(forceRefresh = false) {
   const cacheKey = "products:popular";
 
   try {
-    // Check Redis cache first
-    const cachedData = await redisClient.get(cacheKey);
-    if (cachedData) {
-      return JSON.parse(cachedData);
+    // 1. Check Redis cache ONLY if NOT forcing a refresh
+    if (!forceRefresh) {
+      const cachedData = await redisClient.get(cacheKey);
+      if (cachedData) {
+        console.log("Serving Popular Products from Cache.");
+        return JSON.parse(cachedData);
+      }
     }
 
-    // Fetch from WooCommerce if not cached
+    // 2. Fetch fresh data from WooCommerce
+    console.log("Fetching fresh Popular Products from WooCommerce...");
     const params = {
       orderby: 'popularity',
       order: 'desc',
@@ -342,7 +338,7 @@ export async function fetchPopularProducts() {
       images: product.images[0] ? [product.images[0]] : []
     }));
 
-    // Cache for 24 hours
+    // 3. Update the cache for 24 hours
     await redisClient.set(cacheKey, JSON.stringify(products), "EX", CACHE_TTL);
 
     return products;
@@ -355,11 +351,12 @@ export async function fetchPopularProducts() {
 /**
  * Cache popular products on server start
  * Automatically warms up the cache with 12 most popular products
+ * @param {boolean} forceRefresh - Pass through to trigger fresh fetch
  */
-export async function cachePopularProductsOnStart() {
+export async function cachePopularProductsOnStart(forceRefresh = false) {
   try {
     console.log("Warming up Popular Products Cache...");
-    await fetchPopularProducts();
+    await fetchPopularProducts(forceRefresh);
     console.log("Popular Products Cache Warmup Complete!");
   } catch (error) {
     console.error("Failed to warm up popular products cache:", error.message);

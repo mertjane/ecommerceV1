@@ -106,27 +106,30 @@ export async function getFilteredProducts(queryFilters) {
 
 /**
  * Get Filter Options (Sidebar Facets)
- * This still uses your WP Integration because these don't change often
+ * @param {boolean} forceRefresh - If true, bypasses Redis and fetches fresh from WP
  */
-export async function getFilterOptions() {
-  // 1. Try Redis
-  try {
-    const cachedData = await redisClient.get(FILTER_OPTIONS_KEY);
-    if (cachedData) {
-      return JSON.parse(cachedData);
+export async function getFilterOptions(forceRefresh = false) {
+  // 1. Try Redis ONLY if we are NOT forcing a refresh
+  if (!forceRefresh) {
+    try {
+      const cachedData = await redisClient.get(FILTER_OPTIONS_KEY);
+      if (cachedData) {
+        return JSON.parse(cachedData);
+      }
+    } catch (err) {
+      console.error("Redis get error:", err);
     }
-  } catch (err) {
-    console.error("Redis get error:", err);
   }
 
-  // 2. Fallback: Fetch from WP (using your integrations/wordpress/filter.wp.js)
-  // This is okay because it only happens once every 24 hours (due to cache)
+  // 2. Fetch fresh from WP (This runs if cache is empty OR forceRefresh is true)
+  console.log("Fetching fresh filter options from WordPress...");
   const data = await fetchFilterOptionsFromWP();
 
-  // 3. Save to Redis
+  // 3. Save to Redis (Overwrites old data)
   if (data) {
     try {
       await redisClient.set(FILTER_OPTIONS_KEY, JSON.stringify(data), "EX", CACHE_TTL);
+      console.log("Filter options cache updated.");
     } catch (err) {
       console.error("Redis set error:", err);
     }
@@ -135,10 +138,10 @@ export async function getFilterOptions() {
   return data;
 }
 
-export async function cacheFilterOptionsOnStart() {
+export async function cacheFilterOptionsOnStart(forceRefresh = false) {
   try {
     console.log("Warming up Filter Options Cache...");
-    await getFilterOptions();
+    await getFilterOptions(forceRefresh);
     console.log("Filter Options Cache Warmup Complete!");
   } catch (error) {
     console.error("Failed to warm up Filter Options cache:", error.message);
