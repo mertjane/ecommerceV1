@@ -18,14 +18,19 @@ jobs:
         key: ${{ secrets.SSH_PRIVATE_KEY }}
         port: 22
         script: |
+          # Load nvm/node environment
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
           # 1. Go to the project folder
           cd ~/ecommerceV1
-          
-          # 2. Pull the latest code from GitHub
-          git pull origin main
-          
+
+          # 2. Pull the latest code from GitHub (force to avoid conflicts)
+          git fetch origin
+          git reset --hard origin/main
+
           # 3. Install any new dependencies (if package.json changed)
           npm install
-          
+
           # 4. Restart the backend
           pm2 restart backend
