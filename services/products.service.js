@@ -148,7 +148,7 @@ export async function cacheAllCategoriesOnStart(forceRefresh = false) {
     if (!forceRefresh) {
       const existingKeys = await redisClient.keys("category:*");
       if (existingKeys.length > 0) {
-        console.log("⚡ Categories already in cache. Skipping warmup.");
+        console.log("Categories already in cache. Skipping warmup.");
         return;
       }
     }
@@ -174,7 +174,7 @@ export async function cacheAllCategoriesOnStart(forceRefresh = false) {
       // Check for duplicates (Infinite Loop Protection)
       const firstItemId = data[0].id;
       if (processedIds.has(firstItemId)) {
-        console.log("   (Stop: Detected duplicate page / Infinite loop)");
+        console.log("(Stop: Detected duplicate page / Infinite loop)");
         fetching = false;
         break;
       }
@@ -374,6 +374,33 @@ export async function cachePopularProductsOnStart(forceRefresh = false) {
 /**
 
  */
+/**
+ * Fetch a single product by slug
+ * Uses in-memory cache for fast lookups
+ * @param {string} slug - Product slug
+ * @returns {Promise<Object|null>} - Product or null if not found
+ */
+export async function fetchProductBySlug(slug) {
+  try {
+    // 1. GET DATA (Instant from Redis/RAM)
+    const allProducts = await fetchAllProducts();
+
+    // 2. Find product by slug: O(n)
+    const product = allProducts.find(p => p.slug === slug);
+
+    if (!product) {
+      console.log(`[PRODUCT] Product not found for slug: ${slug}`);
+      return null;
+    }
+
+    console.log(`[PRODUCT] Found product: ${product.name} (${product.id})`);
+    return product;
+  } catch (error) {
+    console.error("Error fetching product by slug:", error);
+    return null;
+  }
+}
+
 export async function fetchNewArrivals(page = 1, perPage = 12) {
   try {
     // 1. GET DATA (Instant from Redis/RAM)

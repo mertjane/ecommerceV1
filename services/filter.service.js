@@ -50,12 +50,18 @@ export async function getFilteredProducts(queryFilters) {
       // productAttr.options example: ["Black", "White"]
       const hasMatch = productAttr.options.some((optionName) => {
         const normalizedName = optionName.toLowerCase();
-        
+
         // 1. Check exact name ("black")
         if (requestedOptions.includes(normalizedName)) return true;
 
-        // 2. Check slugified name ("black-and-white" matches "Black and White")
-        const slugifiedName = normalizedName.replace(/\s+/g, '-');
+        // 2. Check slugified name - properly convert "Honed (Matt - Smooth)" to "honed-matt-smooth"
+        const slugifiedName = normalizedName
+          .replace(/&amp;/g, '-')         // HTML entity &amp; -> hyphen
+          .replace(/&/g, '-')             // Ampersand -> hyphen
+          .replace(/[()]/g, '')           // Remove parentheses
+          .replace(/[^a-z0-9]+/g, '-')    // Replace any non-alphanumeric with hyphen
+          .replace(/-+/g, '-')            // Collapse multiple hyphens
+          .replace(/^-|-$/g, '');         // Trim leading/trailing hyphens
         if (requestedOptions.includes(slugifiedName)) return true;
 
         return false;
@@ -93,7 +99,7 @@ export async function getFilteredProducts(queryFilters) {
   const startIndex = (parseInt(page) - 1) * parseInt(per_page);
   const paginatedProducts = sortedProducts.slice(startIndex, startIndex + parseInt(per_page));
 
-  console.log(`[FILTER] ⚡ Served ${paginatedProducts.length} filtered products from Cache.`);
+  console.log(`[FILTER] Served ${paginatedProducts.length} filtered products from Cache.`);
 
   return {
     products: paginatedProducts, // Already transformed in fetchAllProducts

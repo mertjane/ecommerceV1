@@ -1,4 +1,4 @@
-import { fetchProductsByCategory, fetchCategoryBySlug, fetchAllCategories, fetchPopularProducts, fetchNewArrivals } from "../services/products.service.js";
+import { fetchProductsByCategory, fetchCategoryBySlug, fetchAllCategories, fetchPopularProducts, fetchNewArrivals, fetchProductBySlug } from "../services/products.service.js";
 import { buildMeta } from "../utils/transform.js";
 
 
@@ -90,6 +90,27 @@ export async function getPopularProducts(req, res) {
   } catch (error) {
     console.error("Error in getPopularProducts:", error);
     return res.status(500).json({ message: "Server error fetching popular products" });
+  }
+}
+
+/**
+ * Controller: Get Single Product by Slug
+ * Route: GET /api/products/slug/:slug
+ */
+export async function getProductBySlug(req, res) {
+  try {
+    const { slug } = req.params;
+
+    const product = await fetchProductBySlug(slug);
+
+    if (!product) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    return res.json({ product });
+  } catch (error) {
+    console.error("Error in getProductBySlug:", error);
+    return res.status(500).json({ message: "Server error fetching product" });
   }
 }
 

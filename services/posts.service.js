@@ -13,11 +13,11 @@ export const fetchPosts = async (query) => {
   // Check Redis cache first
   const cached = await redisClient.get(cacheKey);
   if (cached) {
-    console.log("✓ [CACHE HIT] Serving posts from Redis:", cacheKey);
+    console.log("[CACHE HIT] Serving posts from Redis:", cacheKey);
     return JSON.parse(cached);
   }
 
-  console.log("✗ [CACHE MISS] Fetching posts from WordPress API:", cacheKey);
+  console.log("[CACHE MISS] Fetching posts from WordPress API:", cacheKey);
 
   try {
     const wpUrl = process.env.WC_SITE_URL;
@@ -50,7 +50,7 @@ export const fetchPosts = async (query) => {
 
     // Cache the posts
     await redisClient.set(cacheKey, JSON.stringify(result), "EX", CACHE_TTL);
-    console.log(`✓ [CACHED] Posts saved to Redis (TTL: ${CACHE_TTL}s):`, cacheKey);
+    console.log(`[CACHED] Posts saved to Redis (TTL: ${CACHE_TTL}s):`, cacheKey);
 
     return result;
   } catch (error) {
@@ -68,11 +68,11 @@ export const fetchPostBySlug = async (slug) => {
   // Check Redis cache first
   const cached = await redisClient.get(cacheKey);
   if (cached) {
-    console.log("✓ [CACHE HIT] Serving post from Redis:", cacheKey);
+    console.log("[CACHE HIT] Serving post from Redis:", cacheKey);
     return JSON.parse(cached);
   }
 
-  console.log("✗ [CACHE MISS] Fetching post from WordPress API:", cacheKey);
+  console.log("[CACHE MISS] Fetching post from WordPress API:", cacheKey);
 
   try {
     const wpUrl = process.env.WC_SITE_URL;
@@ -118,7 +118,7 @@ export const fetchPostBySlug = async (slug) => {
 
     // Cache the post
     await redisClient.set(cacheKey, JSON.stringify(result), "EX", CACHE_TTL);
-    console.log(`✓ [CACHED] Post saved to Redis (TTL: ${CACHE_TTL}s):`, cacheKey);
+    console.log(`[CACHED] Post saved to Redis (TTL: ${CACHE_TTL}s):`, cacheKey);
 
     return result;
   } catch (error) {
