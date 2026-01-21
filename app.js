@@ -5,14 +5,18 @@ import searchRoutes from "./routes/search.route.js";
 import postsRoutes from "./routes/posts.route.js";
 import wooPagesRoutes from "./routes/woo-pages.route.js";
 import authRoutes from "./routes/auth.route.js";
+import accountRoutes from "./routes/account.route.js";
 import variationsRoutes from "./routes/variations.route.js";
 import filterRoutes from "./routes/filter.route.js";
 import menuRoute from "./routes/menu.route.js";
+import cartRoutes from "./routes/cart.route.js";
 
 const app = express();
 
-// Enable CORS for all origins
-app.use(cors());
+// Enable CORS for all origins with exposed headers for cart token
+app.use(cors({
+  exposedHeaders: ['X-Cart-Token']
+}));
 
 app.use(express.json());
 
@@ -23,9 +27,9 @@ app.use("/api/search", searchRoutes);
 app.use("/api/posts", postsRoutes);
 app.use("/api/pages", wooPagesRoutes);
 app.use("/api/auth", authRoutes);
+app.use("/api/account", accountRoutes);
 app.use("/api/variations", variationsRoutes);
 app.use("/api/filters", filterRoutes);
-
-
+app.use("/api/cart", cartRoutes);
 
 export default app;

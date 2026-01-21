@@ -54,7 +54,6 @@ export const login = async (req, res) => {
 
     return successResponse(res, result, "Login successful");
   } catch (error) {
-    console.error("Login controller error:", error);
     return handleError(res, error.message || "Login failed", 401);
   }
 };

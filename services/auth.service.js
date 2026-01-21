@@ -107,7 +107,6 @@ export const loginCustomer = async (email, password) => {
       wpToken: authData.token, // WordPress JWT token if needed
     };
   } catch (error) {
-    console.error("Login error:", error);
     throw error;
   }
 };

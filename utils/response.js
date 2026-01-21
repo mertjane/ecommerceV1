@@ -7,12 +7,15 @@ export const successResponse = (res, data, message = "Success", meta = {}) => {
   });
 };
 
-export const handleError = (res, error, message = "Error") => {
-  console.error(error);
-  return res.status(500).json({
+export const handleError = (res, message, statusCode = 500) => {
+  // Strip HTML tags from error messages (e.g., WordPress errors)
+  const cleanMessage = typeof message === 'string'
+    ? message.replace(/<[^>]*>/g, '').trim()
+    : message;
+
+  return res.status(statusCode).json({
     success: false,
-    message,
-    error: error?.message || error,
+    message: cleanMessage,
   });
 };
 
