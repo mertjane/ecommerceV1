@@ -43,7 +43,7 @@ export const transformProducts = (products) => {
         return match ? match[0] : "";
       } catch (e) {
         console.error(`Error parsing price for product ${product.id}`, e);
-        return ""; 
+        return "";
       }
     })(),
     // --- 🛠️ FIX ENDS HERE ---
@@ -52,6 +52,13 @@ export const transformProducts = (products) => {
     images: product.images || [],
     attributes: product.attributes || [],
     variations: product.variations || [],
+    // Product descriptions
+    description: product.description || "",
+    short_description: product.short_description || "",
+    // Product specifications
+    weight: product.weight || "",
+    dimensions: product.dimensions || { length: "", width: "", height: "" },
+    sku: product.sku || "",
     yoast_head_json: {
       og_image: product.yoast_head_json?.og_image || [],
     },

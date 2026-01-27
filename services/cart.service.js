@@ -180,25 +180,58 @@ export const addToCart = async (
   // We should check specific variation stock later if needed.
   if (product.stock_status === "outofstock") throw new Error("Product is out of stock");
 
-  // 2. Determine Price
+  // 2. Determine Price, Weight, and Shipping Class
   let price = 0;
+  
   let finalVariationId = variationId;
   let productImage = product.images?.[0]?.src || "";
+  let variationName = ""; // Store variation name for display in cart
+  let isSample = false; // Flag to identify sample items
+
+  // Shipping-related fields - start with parent product values as defaults
+  let itemWeight = parseFloat(product.weight) || 0;
+  let itemShippingClassId = product.shipping_class_id || 0;
+  let itemShippingClass = product.shipping_class || "";
 
   // 2A. If a specific Variation ID is provided, fetch IT specifically
   if (variationId) {
     try {
       // Fetch the specific variation data from WooCommerce
       const { data: variationData } = await wcApi.get(`products/${productId}/variations/${variationId}`);
-      
+
       if (variationData) {
         // Get the accurate price for this specific size/finish
         price = parseFloat(variationData.sale_price || variationData.price || variationData.regular_price || 0);
-        
+
         // Optional: Update image if the variation has its own specific image
         if (variationData.image && variationData.image.src) {
           productImage = variationData.image.src;
         }
+
+        // Get weight from variation (override parent if variation has its own weight)
+        if (variationData.weight && parseFloat(variationData.weight) > 0) {
+          itemWeight = parseFloat(variationData.weight);
+        }
+
+        // Get shipping class from variation (override parent if variation has its own)
+        if (variationData.shipping_class_id) {
+          itemShippingClassId = variationData.shipping_class_id;
+          itemShippingClass = variationData.shipping_class || "";
+        }
+
+        // Build variation name from attributes (e.g., "Free Sample (100x100)")
+        if (variationData.attributes && variationData.attributes.length > 0) {
+          variationName = variationData.attributes
+            .map(attr => attr.option)
+            .join(' - ');
+        }
+
+        // Check if this is a sample variation (free or full size)
+        const sku = (variationData.sku || "").toLowerCase();
+        const attrOptions = (variationData.attributes || [])
+          .map(attr => (attr.option || "").toLowerCase())
+          .join(" ");
+        isSample = sku.includes("sample") || attrOptions.includes("sample");
       }
     } catch (error) {
       console.warn(`Failed to fetch specific variation ${variationId}:`, error.message);
@@ -206,37 +239,7 @@ export const addToCart = async (
     }
   }
 
-  // 2B. Fallback: If no price found yet (no variation ID or fetch failed)
-  if (price === 0) {
-    // Check parent product simple pricing
-    if (product.sale_price && product.sale_price !== "") {
-      price = parseFloat(product.sale_price);
-    } else if (product.price && product.price !== "") {
-      price = parseFloat(product.price);
-    } else if (product.regular_price && product.regular_price !== "") {
-      price = parseFloat(product.regular_price);
-    }
-
-    // 2C. Handle "Variable" products where parent price is 0 (find cheapest option)
-    if (price === 0 && product.type === "variable") {
-      try {
-        const variations = await fetchProductVariations(productId);
-        if (variations && variations.length > 0) {
-          const variationPrices = variations
-            .map(v => parseFloat(v.sale_price) || parseFloat(v.price) || parseFloat(v.regular_price) || 0)
-            .filter(p => p > 0);
-          
-          if (variationPrices.length > 0) {
-            price = Math.min(...variationPrices);
-          }
-        }
-      } catch (e) {
-        console.error("Failed to fetch variation prices:", e.message);
-      }
-    }
-  }
-
-  if (price === 0) throw new Error("Product has no price set");
+ 
 
   // 3. Generate Key
   // IMPORTANT: We pass finalVariationId here so "60x60" is treated differently than "30x30"
@@ -281,9 +284,15 @@ export const addToCart = async (
       image: productImage,
       variation: variation || [],
       variationId: finalVariationId, // Store the ID for reference
+      variationName, // e.g., "Free Sample (100x100)" or "Full Size Sample"
+      isSample, // true for sample variations (free or full size)
       stockStatus: product.stock_status,
       stockQuantity: product.stock_quantity,
       permalink: product.permalink,
+      // Shipping-related fields for accurate shipping calculation
+      weight: itemWeight,
+      shippingClassId: itemShippingClassId,
+      shippingClass: itemShippingClass,
     };
     cart.items.push(newItem);
   }
