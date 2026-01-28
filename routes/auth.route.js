@@ -7,6 +7,8 @@ import {
   updateProfile,
   logout,
 } from "../controllers/auth.controller.js";
+import { loginLimiter } from "../sec/login-limiter.js";
+import { registerLimiter } from "../sec/register-limiter.js";
 
 const router = express.Router();
 
@@ -15,14 +17,14 @@ const router = express.Router();
  * @desc    Register a new customer
  * @access  Public
  */
-router.post("/register", register);
+router.post("/register", registerLimiter, register);
 
 /**
  * @route   POST /api/auth/login
  * @desc    Login customer
  * @access  Public
  */
-router.post("/login", login);
+router.post("/login", loginLimiter, login);
 
 /**
  * @route   GET /api/auth/me
