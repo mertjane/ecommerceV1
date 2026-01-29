@@ -14,6 +14,9 @@ const cartStorage = new Map();
 // Cart expiration time (24 hours)
 const CART_EXPIRATION_MS = 24 * 60 * 60 * 1000;
 
+// Free sample limits - maximum 4 of the SAME free sample product per cart
+const FREE_SAMPLE_MAX_QTY_PER_PRODUCT = 4;
+
 /**
  * Generate a unique cart token
  */
@@ -244,8 +247,20 @@ export const addToCart = async (
   // 3. Generate Key
   // IMPORTANT: We pass finalVariationId here so "60x60" is treated differently than "30x30"
   const itemKey = generateItemKey(productId, finalVariationId, variation);
-  
+
   const existingItemIndex = cart.items.findIndex((item) => item.key === itemKey);
+
+  // 3A. Validate free sample quantity limit (per product, not total)
+  // Free samples are items with price = 0 - each product can have max 4
+  if (price === 0) {
+    const existingItemQty = existingItemIndex > -1 ? cart.items[existingItemIndex].quantity : 0;
+    const newItemQty = existingItemQty + quantity;
+
+    if (newItemQty > FREE_SAMPLE_MAX_QTY_PER_PRODUCT) {
+      const remaining = FREE_SAMPLE_MAX_QTY_PER_PRODUCT - existingItemQty;
+      throw new Error(`Maximum ${FREE_SAMPLE_MAX_QTY_PER_PRODUCT} free samples of this product allowed. You can add ${remaining > 0 ? remaining : 0} more.`);
+    }
+  }
 
   // 4. Helper to calculate total based on SQM or Quantity
   const calculateItemTotal = (p, q, s) => {
@@ -323,6 +338,14 @@ export const updateCartItem = async (itemKey, quantity, sqm, cartToken) => {
   if (quantity <= 0) {
     cart.items.splice(itemIndex, 1);
   } else {
+    const currentItem = cart.items[itemIndex];
+
+    // Validate free sample quantity limit when increasing quantity (per product limit)
+    const itemPrice = parseFloat(currentItem.price || 0);
+    if (itemPrice === 0 && quantity > FREE_SAMPLE_MAX_QTY_PER_PRODUCT) {
+      throw new Error(`Maximum ${FREE_SAMPLE_MAX_QTY_PER_PRODUCT} free samples of this product allowed.`);
+    }
+
     // Update values
     cart.items[itemIndex].quantity = quantity;
     if (sqm !== undefined) {

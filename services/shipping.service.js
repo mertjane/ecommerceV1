@@ -1,5 +1,6 @@
 import wcApi from "../config/woocommerce.js";
 import redis from "../config/redis.js";
+import { applyConditionalShippingRules } from "./conditionalShipping.service.js";
 
 // Cache TTL for shipping data (1 hour)
 const SHIPPING_CACHE_TTL = 60 * 60;
@@ -252,6 +253,11 @@ export const calculateShippingRates = async (address, cartItems, cartSubtotal) =
           // STEP 3: Now evaluate rules normally
           let matchedCost = 0;
           let hasMatchingRule = false;
+          let hasFreeRule = false;
+
+          if (process.env.NODE_ENV !== 'production' && method.title.includes('2-3')) {
+            console.log(`[Flexible Shipping] Evaluating "${method.title}" - Total Weight: ${totalWeight}kg, Rules: ${rules.length}`);
+          }
 
           for (const rule of rules) {
             let ruleMatches = true;
@@ -300,6 +306,13 @@ export const calculateShippingRates = async (address, cartItems, cartSubtotal) =
             if (ruleMatches) {
               hasMatchingRule = true;
               const ruleCost = parseFloat(rule.cost_per_order || 0);
+
+              if (process.env.NODE_ENV !== 'production' && method.title.includes('2-3')) {
+                console.log(`[Flexible Shipping] Rule matched for "${method.title}" - Cost: £${ruleCost}`);
+              }
+
+              if (ruleCost === 0) hasFreeRule = true;
+
               if (calcMethod === 'sum') matchedCost += ruleCost;
               else matchedCost = ruleCost;
             }
@@ -307,8 +320,9 @@ export const calculateShippingRates = async (address, cartItems, cartSubtotal) =
 
           cost = matchedCost;
 
-          // Hide if no rules matched, OR if cost is 0 (unless explicitly free)
-          if (!hasMatchingRule || matchedCost === 0) {
+          // Hide if no rules matched
+          // Allow FREE (cost 0) if explicitly matched a free rule
+          if (!hasMatchingRule || (matchedCost === 0 && !hasFreeRule)) {
             isAvailable = false;
           }
           break;
@@ -392,9 +406,13 @@ export const calculateShippingRates = async (address, cartItems, cartSubtotal) =
       }
     }
 
+    // STEP 5: Apply conditional shipping rules from WP Trio plugin
+    // This filters out methods based on product-specific conditions
+    const finalMethods = await applyConditionalShippingRules(deduplicatedRates, cartItems);
+
     return {
       zone: { id: zone.id, name: zone.name },
-      methods: deduplicatedRates,
+      methods: finalMethods,
     };
   } catch (error) {
     console.error("Failed to calculate shipping rates:", error.message);
