@@ -1,427 +1,256 @@
-import wcApi from "../config/woocommerce.js";
+import axios from "axios";
 import redis from "../config/redis.js";
-import { applyConditionalShippingRules } from "./conditionalShipping.service.js";
+import crypto from "crypto";
 
-// Cache TTL for shipping data (1 hour)
+const WC_SITE_URL = process.env.WC_SITE_URL;
+const WC_CONSUMER_KEY = process.env.WC_CONSUMER_KEY;
+const WC_CONSUMER_SECRET = process.env.WC_CONSUMER_SECRET;
+const AS_SHIPPING_API_KEY = process.env.AS_SHIPPING_API_KEY;
+
+// Cache TTL for static data (1 hour)
 const SHIPPING_CACHE_TTL = 60 * 60;
+// Cache TTL for shipping rates (5 minutes)
+const SHIPPING_RATES_CACHE_TTL = 5 * 60;
 
 /**
- * Get all shipping zones from WooCommerce
+ * WooCommerce Store API Client
+ * The Store API is designed for cart/checkout operations and triggers all shipping hooks
  */
-export const getShippingZones = async () => {
-  try {
-    // Try cache first
-    const cached = await redis.get("shipping:zones");
-    if (cached) {
-      return JSON.parse(cached);
-    }
+const storeApi = axios.create({
+  baseURL: `${WC_SITE_URL}/wp-json/wc/store/v1`,
+  headers: {
+    "Content-Type": "application/json",
+  },
+});
 
-    const { data: zones } = await wcApi.get("shipping/zones");
+/**
+ * Session Management for WooCommerce Store API
+ * Each shipping calculation needs its own WC session to avoid conflicts
+ */
+const sessionStorage = new Map();
 
-    // Cache the result
-    await redis.setex("shipping:zones", SHIPPING_CACHE_TTL, JSON.stringify(zones));
+/**
+ * Get or create a WooCommerce session for a cart token
+ */
+const getWcSession = (cartToken) => {
+  return sessionStorage.get(cartToken) || null;
+};
 
-    return zones;
-  } catch (error) {
-    console.error("Failed to fetch shipping zones:", error.message);
-    throw new Error("Failed to fetch shipping zones");
+/**
+ * Save WooCommerce session from response headers
+ */
+const saveWcSession = (cartToken, response) => {
+  const wcSession = response.headers["x-wc-session"] || response.headers["cart-token"];
+  if (wcSession) {
+    sessionStorage.set(cartToken, wcSession);
   }
 };
 
 /**
- * Get shipping methods for a specific zone
+ * Build headers for Store API request
  */
-export const getShippingMethodsForZone = async (zoneId) => {
-  try {
-    const cacheKey = `shipping:zone:${zoneId}:methods`;
-    const cached = await redis.get(cacheKey);
-    if (cached) {
-      return JSON.parse(cached);
-    }
+const buildStoreApiHeaders = (cartToken) => {
+  const headers = {
+    "Content-Type": "application/json",
+  };
 
-    const { data: methods } = await wcApi.get(`shipping/zones/${zoneId}/methods`);
-
-    // Only return enabled methods
-    const enabledMethods = methods.filter((method) => method.enabled);
-
-    // Cache the result
-    await redis.setex(cacheKey, SHIPPING_CACHE_TTL, JSON.stringify(enabledMethods));
-
-    return enabledMethods;
-  } catch (error) {
-    console.error(`Failed to fetch shipping methods for zone ${zoneId}:`, error.message);
-    throw new Error("Failed to fetch shipping methods");
+  const wcSession = getWcSession(cartToken);
+  if (wcSession) {
+    headers["Cart-Token"] = wcSession;
   }
+
+  return headers;
 };
 
 /**
- * Get zone locations (countries/regions)
+ * Sync local cart items to WooCommerce Store API cart
+ * This prepares WooCommerce to calculate accurate shipping rates
  */
-export const getZoneLocations = async (zoneId) => {
+const syncCartToWooCommerce = async (cartToken, cartItems) => {
   try {
-    const cacheKey = `shipping:zone:${zoneId}:locations`;
-    const cached = await redis.get(cacheKey);
-    if (cached) {
-      return JSON.parse(cached);
+    const headers = buildStoreApiHeaders(cartToken);
+
+    // First, clear any existing items in the WC session cart
+    try {
+      const cartResponse = await storeApi.get("/cart", { headers });
+      saveWcSession(cartToken, cartResponse);
+
+      // Remove existing items
+      const existingItems = cartResponse.data.items || [];
+      for (const item of existingItems) {
+        try {
+          await storeApi.post(
+            "/cart/remove-item",
+            { key: item.key },
+            { headers: buildStoreApiHeaders(cartToken) }
+          );
+        } catch (e) {
+          // Ignore removal errors
+        }
+      }
+    } catch (e) {
+      // Cart doesn't exist yet, that's fine
     }
 
-    const { data: locations } = await wcApi.get(`shipping/zones/${zoneId}/locations`);
+    // Add each local cart item to WooCommerce cart
+    for (const item of cartItems) {
+      try {
+        // For WooCommerce Store API:
+        // - Simple products: use productId as id
+        // - Variable products: use variationId as id (the variation IS the product to add)
+        const productIdToAdd = item.variationId || item.productId;
 
-    // Cache the result
-    await redis.setex(cacheKey, SHIPPING_CACHE_TTL, JSON.stringify(locations));
+        const addItemPayload = {
+          id: productIdToAdd,
+          quantity: item.quantity,
+        };
 
-    return locations;
-  } catch (error) {
-    console.error(`Failed to fetch zone locations for zone ${zoneId}:`, error.message);
-    throw new Error("Failed to fetch zone locations");
-  }
-};
-
-/**
- * Find the appropriate shipping zone for a given address
- */
-export const findZoneForAddress = async (country, postcode = "", state = "") => {
-  try {
-    const zones = await getShippingZones();
-
-    // Sort zones by ID descending (higher IDs are more specific)
-    // Zone 0 is "Locations not covered by your other zones"
-    const sortedZones = zones.sort((a, b) => b.id - a.id);
-
-    for (const zone of sortedZones) {
-      // Skip zone 0 for now (fallback zone)
-      if (zone.id === 0) continue;
-
-      const locations = await getZoneLocations(zone.id);
-
-      for (const location of locations) {
-        // Check country match
-        if (location.type === "country" && location.code === country) {
-          return zone;
+        if (process.env.NODE_ENV !== "production") {
+          console.log(`[Shipping] Adding to WC cart: id=${productIdToAdd}, qty=${item.quantity}, name=${item.name}`);
         }
 
-        // Check state/region match (format: "country:state")
-        if (location.type === "state") {
-          const [locCountry, locState] = location.code.split(":");
-          if (locCountry === country && locState === state) {
-            return zone;
-          }
-        }
+        const response = await storeApi.post("/cart/add-item", addItemPayload, {
+          headers: buildStoreApiHeaders(cartToken),
+        });
 
-        // Check postcode match
-        if (location.type === "postcode" && location.code === postcode) {
-          return zone;
-        }
-
-        // Check continent match
-        if (location.type === "continent") {
-          // Would need a continent mapping here
-          // For simplicity, skip continent matching for now
-        }
+        saveWcSession(cartToken, response);
+      } catch (error) {
+        console.error(`Failed to add item ${item.productId} (variation: ${item.variationId}) to WC cart:`, error.response?.data || error.message);
+        // Continue with other items
       }
     }
 
-    // Return zone 0 (fallback zone) if no specific zone matched
-    const fallbackZone = zones.find((z) => z.id === 0);
-    return fallbackZone || null;
+    return true;
   } catch (error) {
-    console.error("Failed to find zone for address:", error.message);
-    throw new Error("Failed to determine shipping zone");
+    console.error("Failed to sync cart to WooCommerce:", error.message);
+    throw new Error("Failed to sync cart for shipping calculation");
   }
 };
 
-
 /**
- * Calculate shipping rates for given address and cart
- * Handles: Flat Rate, Free Shipping, Local Pickup, and Flexible Shipping
+ * Calculate shipping rates using WooCommerce Store API
+ *
+ * This is the core function that:
+ * 1. Syncs local cart to WooCommerce
+ * 2. Updates customer shipping address
+ * 3. Gets WooCommerce's calculated shipping rates (with all plugins applied)
+ *
+ * @param {Object} address - Shipping address { country, postcode, state, city, address_1 }
+ * @param {Array} cartItems - Local cart items to sync
+ * @param {string} cartToken - Local cart token for session management
+ * @returns {Object} Shipping rates calculated by WooCommerce
  */
-export const calculateShippingRates = async (address, cartItems, cartSubtotal) => {
+export const calculateShippingRates = async (address, cartItems, cartToken) => {
   try {
-    const { country, postcode, state } = address;
+    const { country, postcode, state, city, address_1 } = address;
 
-    if (!country) throw new Error("Country is required");
-
-    // 1. Calculate Total Weight
-    const totalWeight = cartItems.reduce((total, item) => {
-      return total + (parseFloat(item.weight || 0) * item.quantity);
-    }, 0);
-
-    // 2. Get all Shipping Class IDs present in the cart
-    // We create a Set of IDs for easy lookup (e.g. ["moulding", "heavy"])
-    const cartShippingClasses = cartItems.map(item => String(item.shippingClassId || ""));
-
-    const zone = await findZoneForAddress(country, postcode, state);
-
-    if (!zone) {
-      return { zone: null, methods: [], message: "No shipping available" };
+    if (!country) {
+      throw new Error("Country is required");
     }
 
-    const methods = await getShippingMethodsForZone(zone.id);
+    if (!cartItems || cartItems.length === 0) {
+      throw new Error("Cart is empty");
+    }
 
-    const rates = methods.map((method) => {
-      let cost = 0;
-      let label = method.title;
-      let isAvailable = true; 
+    // Step 1: Sync local cart items to WooCommerce
+    if (process.env.NODE_ENV !== "production") {
+      console.log(`[Shipping] Syncing ${cartItems.length} items to WooCommerce for shipping calculation`);
+    }
 
-      switch (method.method_id) {
-        
-        // --- CASE 1: FLEXIBLE SHIPPING ---
-        case "flexible_shipping_single":
-          const rules = method.settings?.method_rules?.value || [];
-          const calcMethod = method.settings?.method_calculation_method?.value || 'sum';
+    await syncCartToWooCommerce(cartToken, cartItems);
 
-          // Get cart's shipping class IDs (filter out 0/empty)
-          const cartClassIds = cartItems
-            .map(item => String(item.shippingClassId || 0))
-            .filter(id => id && id !== "0");
-
-          // STEP 1: Collect ALL shipping class requirements from ALL rules
-          // This helps us determine if this method is meant for specific shipping classes
-          const methodRequiredClasses = new Set();
-
-          // Check method-level shipping class restriction (some plugins use this)
-          const methodShippingClass = method.settings?.method_shipping_class?.value;
-          if (methodShippingClass && methodShippingClass !== "" && methodShippingClass !== "0") {
-            methodRequiredClasses.add(String(methodShippingClass));
-          }
-
-          // Also check rule-level shipping class conditions
-          for (const rule of rules) {
-            if (rule.conditions) {
-              for (const condition of rule.conditions) {
-                if (condition.condition_id === 'shipping_class') {
-                  const classes = Array.isArray(condition.value) ? condition.value : [condition.value];
-                  classes.forEach(c => methodRequiredClasses.add(String(c)));
-                }
-              }
-            }
-          }
-
-          // Debug: Log method info to help identify configuration issues
-          if (process.env.NODE_ENV !== 'production') {
-            console.log(`[Shipping] Method: ${method.title}, Required Classes: [${[...methodRequiredClasses].join(', ')}], Cart Classes: [${cartClassIds.join(', ')}]`);
-          }
-
-          // STEP 2: If this method requires specific shipping classes,
-          // check if cart has ANY items with those classes
-          if (methodRequiredClasses.size > 0) {
-            const cartHasRequiredClass = cartClassIds.some(classId =>
-              methodRequiredClasses.has(classId)
-            );
-
-            // If cart doesn't have any of the required shipping classes, skip this method entirely
-            if (!cartHasRequiredClass) {
-              isAvailable = false;
-              break;
-            }
-          }
-
-          // STEP 2B: Fallback - Filter based on method title keywords
-          // This handles cases where WooCommerce isn't configured with proper shipping_class conditions
-          // but the method title indicates it's for a specific product type
-          const methodTitleLower = method.title.toLowerCase();
-          const specializedKeywords = [
-            { keyword: 'moulding', shippingClasses: ['moulding'] },
-            { keyword: 'ltp', shippingClasses: ['ltp'] },
-            { keyword: 'jerusalem', shippingClasses: ['jerusalem'] },
-            { keyword: 'vanity', shippingClasses: ['vanity', 'vanity-top', 'vanity_top'] },
-            { keyword: 'brazilian', shippingClasses: ['brazilian'] },
-            { keyword: 'slab', shippingClasses: ['slab', 'slabs'] },
-          ];
-
-          for (const { keyword, shippingClasses } of specializedKeywords) {
-            if (methodTitleLower.includes(keyword)) {
-              // This method is for a specialized product type
-              // Check if cart has items with this shipping class
-              const hasMatchingClass = cartItems.some(item => {
-                const itemClass = (item.shippingClass || '').toLowerCase();
-                const itemClassId = String(item.shippingClassId || 0);
-                return shippingClasses.some(sc =>
-                  itemClass.includes(sc) || itemClassId === sc
-                );
-              });
-
-              if (!hasMatchingClass) {
-                isAvailable = false;
-                break;
-              }
-            }
-          }
-
-          if (!isAvailable) break;
-
-          // STEP 3: Now evaluate rules normally
-          let matchedCost = 0;
-          let hasMatchingRule = false;
-          let hasFreeRule = false;
-
-          if (process.env.NODE_ENV !== 'production' && method.title.includes('2-3')) {
-            console.log(`[Flexible Shipping] Evaluating "${method.title}" - Total Weight: ${totalWeight}kg, Rules: ${rules.length}`);
-          }
-
-          for (const rule of rules) {
-            let ruleMatches = true;
-
-            if (rule.conditions) {
-              for (const condition of rule.conditions) {
-
-                // A. Check Weight
-                if (condition.condition_id === 'weight') {
-                  const min = parseFloat(condition.min || 0);
-                  const max = condition.max && condition.max !== "" ? parseFloat(condition.max) : Infinity;
-                  if (totalWeight < min || totalWeight > max) {
-                    ruleMatches = false;
-                    break;
-                  }
-                }
-
-                // B. Check Price
-                if (condition.condition_id === 'price') {
-                  const min = parseFloat(condition.min || 0);
-                  const max = condition.max && condition.max !== "" ? parseFloat(condition.max) : Infinity;
-                  if (parseFloat(cartSubtotal) < min || parseFloat(cartSubtotal) > max) {
-                    ruleMatches = false;
-                    break;
-                  }
-                }
-
-                // C. Check Shipping Class
-                if (condition.condition_id === 'shipping_class') {
-                  const requiredClasses = Array.isArray(condition.value)
-                    ? condition.value
-                    : [condition.value];
-
-                  const hasClass = cartItems.some(item =>
-                    requiredClasses.includes(String(item.shippingClassId))
-                  );
-
-                  if (!hasClass) {
-                    ruleMatches = false;
-                    break;
-                  }
-                }
-              }
-            }
-
-            if (ruleMatches) {
-              hasMatchingRule = true;
-              const ruleCost = parseFloat(rule.cost_per_order || 0);
-
-              if (process.env.NODE_ENV !== 'production' && method.title.includes('2-3')) {
-                console.log(`[Flexible Shipping] Rule matched for "${method.title}" - Cost: £${ruleCost}`);
-              }
-
-              if (ruleCost === 0) hasFreeRule = true;
-
-              if (calcMethod === 'sum') matchedCost += ruleCost;
-              else matchedCost = ruleCost;
-            }
-          }
-
-          cost = matchedCost;
-
-          // Hide if no rules matched
-          // Allow FREE (cost 0) if explicitly matched a free rule
-          if (!hasMatchingRule || (matchedCost === 0 && !hasFreeRule)) {
-            isAvailable = false;
-          }
-          break;
-
-        // --- CASE 2: FLAT RATE ---
-        case "flat_rate":
-          cost = parseFloat(method.settings?.cost?.value || 0);
-          if (method.settings?.cost?.value?.includes("[qty]")) {
-             // ... (keep existing logic) ...
-             const basePattern = method.settings.cost.value;
-             const totalQty = cartItems.reduce((sum, item) => sum + item.quantity, 0);
-             const baseCost = parseFloat(basePattern.replace(/\[qty\].*/, "").trim()) || 0;
-             const perItemCost = parseFloat(basePattern.match(/\[qty\]\s*\*\s*([\d.]+)/)?.[1]) || 0;
-             cost = baseCost + (perItemCost * totalQty);
-          }
-          break;
-
-        // --- CASE 3: FREE SHIPPING ---
-        case "free_shipping":
-          cost = 0;
-          const minAmount = parseFloat(method.settings?.min_amount?.value || 0);
-          if (minAmount > 0 && parseFloat(cartSubtotal) < minAmount) {
-            isAvailable = false;
-          }
-          break;
-
-        // --- CASE 4: LOCAL PICKUP ---
-        case "local_pickup":
-          cost = parseFloat(method.settings?.cost?.value || 0);
-          break;
-
-        default:
-          cost = parseFloat(method.settings?.cost?.value || 0);
-      }
-
-      if (!isAvailable) return null;
-
-      return {
-        id: method.instance_id,
-        methodId: method.method_id,
-        title: label,
-        description: method.settings?.method_description?.value || "",
-        cost: cost.toFixed(2),
-        taxable: method.settings?.tax_status?.value !== "none",
-      };
-    }).filter(Boolean);
-
-    // STEP 4: Deduplicate methods with similar titles
-    // Normalize titles to catch variations like "2 - 3 Days" vs "2-3 Days" vs "2 to 3 Days"
-    const normalizeTitle = (title) => {
-      return title
-        .toLowerCase()
-        .replace(/\s+/g, ' ')           // Normalize multiple spaces
-        .replace(/\s*-\s*/g, '-')       // Normalize dashes: "2 - 3" -> "2-3"
-        .replace(/\s*to\s*/g, '-')      // Convert "to" to dash: "2 to 3" -> "2-3"
-        .replace(/:/g, '.')             // Normalize time: "12:00" -> "12.00"
-        .trim();
+    // Step 2: Update customer shipping address via Store API
+    // This triggers WooCommerce's shipping calculation including all plugins
+    const updateCustomerPayload = {
+      shipping_address: {
+        country: country,
+        state: state || "",
+        postcode: postcode || "",
+        city: city || "",
+        address_1: address_1 || "",
+      },
     };
 
-    const seenTitles = new Map(); // normalized title -> rate object
-    const deduplicatedRates = [];
-
-    for (const rate of rates) {
-      const normalizedTitle = normalizeTitle(rate.title);
-
-      if (!seenTitles.has(normalizedTitle)) {
-        // First time seeing this title, keep it
-        seenTitles.set(normalizedTitle, rate);
-        deduplicatedRates.push(rate);
-      } else {
-        // Duplicate found - keep the one with lower cost (better for customer)
-        const existingRate = seenTitles.get(normalizedTitle);
-        const existingIndex = deduplicatedRates.indexOf(existingRate);
-
-        if (parseFloat(rate.cost) < parseFloat(existingRate.cost)) {
-          // New rate is cheaper, replace the existing one
-          deduplicatedRates[existingIndex] = rate;
-          seenTitles.set(normalizedTitle, rate);
-        }
-        // Otherwise keep the existing (cheaper or equal) rate
-      }
+    if (process.env.NODE_ENV !== "production") {
+      console.log(`[Shipping] Updating customer address:`, updateCustomerPayload.shipping_address);
     }
 
-    // STEP 5: Apply conditional shipping rules from WP Trio plugin
-    // This filters out methods based on product-specific conditions
-    const finalMethods = await applyConditionalShippingRules(deduplicatedRates, cartItems);
+    const response = await storeApi.post("/cart/update-customer", updateCustomerPayload, {
+      headers: buildStoreApiHeaders(cartToken),
+    });
+
+    saveWcSession(cartToken, response);
+
+    // Step 3: Extract shipping rates from WooCommerce response
+    const cartData = response.data;
+    const shippingRates = cartData.shipping_rates || [];
+
+    if (process.env.NODE_ENV !== "production") {
+      console.log(`[Shipping] WooCommerce returned ${shippingRates.length} shipping package(s)`);
+    }
+
+    // Step 4: Format rates for frontend
+    const formattedMethods = formatShippingRates(shippingRates);
 
     return {
-      zone: { id: zone.id, name: zone.name },
-      methods: finalMethods,
+      zone: null, // WooCommerce handles zones internally
+      methods: formattedMethods,
+      wcSession: getWcSession(cartToken), // Return session for frontend to store
     };
   } catch (error) {
-    console.error("Failed to calculate shipping rates:", error.message);
+    console.error("Shipping calculation error:", error.response?.data || error.message);
+
+    // Provide helpful error messages
+    if (error.response?.status === 404) {
+      throw new Error("WooCommerce Store API not available. Please ensure WooCommerce is up to date.");
+    }
+
     throw new Error(error.message || "Failed to calculate shipping rates");
   }
 };
 
 /**
+ * Format WooCommerce Store API shipping rates for frontend
+ */
+const formatShippingRates = (shippingRates) => {
+  const methods = [];
+
+  for (const package_ of shippingRates) {
+    const packageRates = package_.shipping_rates || [];
+
+    for (const rate of packageRates) {
+      methods.push({
+        id: rate.rate_id,
+        methodId: rate.method_id,
+        instanceId: rate.instance_id,
+        title: rate.name,
+        description: rate.meta_data?.find(m => m.key === "description")?.value || "",
+        cost: formatPrice(rate.price),
+        currencyCode: rate.currency_code,
+        currencySymbol: rate.currency_symbol,
+        taxable: rate.taxes && Object.keys(rate.taxes).length > 0,
+        selected: rate.selected || false,
+        // Include delivery time if available from meta
+        deliveryTime: rate.meta_data?.find(m => m.key === "delivery_time")?.value || null,
+      });
+    }
+  }
+
+  return methods;
+};
+
+/**
+ * Format price from minor units (cents) to major units (pounds)
+ * WooCommerce Store API returns prices in minor units
+ */
+const formatPrice = (priceInMinorUnits) => {
+  const price = parseInt(priceInMinorUnits, 10) || 0;
+  return (price / 100).toFixed(2);
+};
+
+/**
  * Get available shipping countries from WooCommerce settings
+ * Uses the legacy WC REST API since this is configuration data
  */
 export const getShippingCountries = async () => {
   try {
@@ -430,8 +259,16 @@ export const getShippingCountries = async () => {
       return JSON.parse(cached);
     }
 
-    // Get allowed countries from WooCommerce settings
-    const { data: settings } = await wcApi.get("settings/general");
+    // Use legacy REST API for settings (requires authentication)
+    const { data: settings } = await axios.get(
+      `${WC_SITE_URL}/wp-json/wc/v3/settings/general`,
+      {
+        auth: {
+          username: WC_CONSUMER_KEY,
+          password: WC_CONSUMER_SECRET,
+        },
+      }
+    );
 
     // Find shipping locations settings
     const shippingCountries = settings.find(
@@ -447,7 +284,15 @@ export const getShippingCountries = async () => {
       countries = shippingCountries.value;
     } else {
       // Get all countries if all are allowed
-      const { data: allCountries } = await wcApi.get("data/countries");
+      const { data: allCountries } = await axios.get(
+        `${WC_SITE_URL}/wp-json/wc/v3/data/countries`,
+        {
+          auth: {
+            username: WC_CONSUMER_KEY,
+            password: WC_CONSUMER_SECRET,
+          },
+        }
+      );
       countries = allCountries.map((c) => ({
         code: c.code,
         name: c.name,
@@ -466,7 +311,37 @@ export const getShippingCountries = async () => {
 };
 
 /**
- * Clear shipping cache (called when settings change)
+ * Get shipping zones (optional - for admin/debugging)
+ * Uses legacy REST API
+ */
+export const getShippingZones = async () => {
+  try {
+    const cached = await redis.get("shipping:zones");
+    if (cached) {
+      return JSON.parse(cached);
+    }
+
+    const { data: zones } = await axios.get(
+      `${WC_SITE_URL}/wp-json/wc/v3/shipping/zones`,
+      {
+        auth: {
+          username: WC_CONSUMER_KEY,
+          password: WC_CONSUMER_SECRET,
+        },
+      }
+    );
+
+    await redis.setex("shipping:zones", SHIPPING_CACHE_TTL, JSON.stringify(zones));
+
+    return zones;
+  } catch (error) {
+    console.error("Failed to fetch shipping zones:", error.message);
+    throw new Error("Failed to fetch shipping zones");
+  }
+};
+
+/**
+ * Clear shipping cache
  */
 export const clearShippingCache = async () => {
   try {
@@ -474,9 +349,240 @@ export const clearShippingCache = async () => {
     if (keys.length > 0) {
       await redis.del(...keys);
     }
+
+    // Also clear session storage
+    sessionStorage.clear();
+
     return true;
   } catch (error) {
     console.error("Failed to clear shipping cache:", error.message);
     return false;
   }
+};
+
+/**
+ * Select a shipping method in WooCommerce
+ * Call this when user selects a shipping method
+ */
+export const selectShippingMethod = async (cartToken, rateId) => {
+  try {
+    const response = await storeApi.post(
+      "/cart/select-shipping-rate",
+      {
+        package_id: 0, // Usually 0 for single-package orders
+        rate_id: rateId,
+      },
+      {
+        headers: buildStoreApiHeaders(cartToken),
+      }
+    );
+
+    saveWcSession(cartToken, response);
+
+    return {
+      success: true,
+      cart: response.data,
+    };
+  } catch (error) {
+    console.error("Failed to select shipping method:", error.response?.data || error.message);
+    throw new Error("Failed to select shipping method");
+  }
+};
+
+// ============================================================================
+// CUSTOM ENDPOINT APPROACH (Alternative to Store API)
+// Uses the custom as-shipping/v1/calculate endpoint for direct package-based calculation
+// ============================================================================
+
+/**
+ * Custom Shipping API Client
+ * Calls the custom WooCommerce REST endpoint that programmatically calculates shipping
+ */
+const customShippingApi = axios.create({
+  baseURL: `${WC_SITE_URL}/wp-json/as-shipping/v1`,
+  timeout: 30000,
+  headers: {
+    "Content-Type": "application/json",
+    "X-AS-Shipping-Key": AS_SHIPPING_API_KEY,
+  },
+});
+
+/**
+ * Generate cache key for shipping calculation
+ * @param {Array} items - Cart items
+ * @param {Object} destination - Shipping destination
+ * @returns {string} Cache key
+ */
+const generateShippingCacheKey = (items, destination) => {
+  const payload = JSON.stringify({ items, destination });
+  const hash = crypto.createHash("md5").update(payload).digest("hex");
+  return `shipping:rates:${hash}`;
+};
+
+/**
+ * Map internal cart format to WooCommerce API format
+ * @param {Array} cartItems - Internal cart items
+ * @returns {Array} WooCommerce-formatted items
+ */
+const mapCartToWcFormat = (cartItems) => {
+  return cartItems.map((item) => ({
+    product_id: item.productId || item.product_id,
+    variation_id: item.variationId || item.variation_id || 0,
+    quantity: item.quantity,
+  }));
+};
+
+/**
+ * Calculate shipping rates using custom WooCommerce endpoint
+ * This approach directly calls WC_Shipping::calculate_shipping() with a programmatic package
+ *
+ * @param {Array} items - Cart items in internal format
+ * @param {Object} destination - Shipping destination { country, postcode, state, city }
+ * @param {Object} options - Optional settings { customerId, coupons, useCache }
+ * @returns {Promise<Object>} Shipping rates and package info
+ */
+export const calculateShippingViaCustomEndpoint = async (items, destination, options = {}) => {
+  const { customerId = null, coupons = [], useCache = true } = options;
+
+  if (!AS_SHIPPING_API_KEY) {
+    throw new Error("AS_SHIPPING_API_KEY environment variable is not configured");
+  }
+
+  if (!items || items.length === 0) {
+    throw new Error("Cart is empty");
+  }
+
+  if (!destination?.country) {
+    throw new Error("Destination country is required");
+  }
+
+  // Map to WooCommerce format
+  const wcItems = mapCartToWcFormat(items);
+
+  // Check cache if enabled
+  if (useCache) {
+    const cacheKey = generateShippingCacheKey(wcItems, destination);
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        if (process.env.NODE_ENV !== "production") {
+          console.log("[Shipping] Returning cached rates");
+        }
+        return JSON.parse(cached);
+      }
+    } catch (e) {
+      // Cache miss or error, continue to API call
+    }
+  }
+
+  try {
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[Shipping] Calling custom endpoint with", wcItems.length, "items");
+    }
+
+    const requestPayload = {
+      items: wcItems,
+      destination: {
+        country: destination.country,
+        state: destination.state || "",
+        postcode: destination.postcode || "",
+        city: destination.city || "",
+      },
+      customer_id: customerId,
+      coupons,
+    };
+
+    console.log("[Shipping] Custom endpoint request:", JSON.stringify(requestPayload, null, 2));
+
+    const response = await customShippingApi.post("/calculate", requestPayload);
+
+    console.log("[Shipping] Custom endpoint response:", JSON.stringify(response.data, null, 2));
+
+    const { success, rates, package_info, error } = response.data;
+
+    if (!success) {
+      throw new Error(error || "Shipping calculation failed");
+    }
+
+    // Format rates for frontend
+    const formattedRates = rates.map((rate) => ({
+      id: rate.id,
+      methodId: rate.method_id,
+      instanceId: rate.instance_id,
+      title: rate.label,
+      cost: rate.cost,
+      taxes: rate.taxes,
+      metaData: rate.meta_data,
+    }));
+
+    const result = {
+      methods: formattedRates,
+      packageInfo: {
+        totalWeight: package_info.total_weight,
+        contentsCost: package_info.contents_cost,
+        itemCount: package_info.item_count,
+        destination: package_info.destination,
+      },
+    };
+
+    // Cache the result
+    if (useCache) {
+      const cacheKey = generateShippingCacheKey(wcItems, destination);
+      try {
+        await redis.setex(cacheKey, SHIPPING_RATES_CACHE_TTL, JSON.stringify(result));
+      } catch (e) {
+        // Cache write error, ignore
+      }
+    }
+
+    return result;
+  } catch (error) {
+    if (error.response?.status === 401) {
+      throw new Error("Invalid shipping API key");
+    }
+    if (error.response?.status === 400) {
+      throw new Error(error.response.data?.error || "Invalid shipping request");
+    }
+    if (error.code === "ECONNABORTED") {
+      throw new Error("Shipping calculation timed out");
+    }
+
+    console.error("[Shipping] Custom endpoint error:", error.response?.data || error.message);
+    throw new Error(error.response?.data?.error || "Failed to calculate shipping rates");
+  }
+};
+
+/**
+ * Calculate shipping with fallback
+ * Tries custom endpoint first, falls back to Store API if custom endpoint fails
+ *
+ * @param {Object} address - Shipping address
+ * @param {Array} cartItems - Cart items
+ * @param {string} cartToken - Cart session token
+ * @returns {Promise<Object>} Shipping rates
+ */
+export const calculateShippingWithFallback = async (address, cartItems, cartToken) => {
+  console.log("[Shipping] calculateShippingWithFallback called with:");
+  console.log("[Shipping] - Address:", JSON.stringify(address));
+  console.log("[Shipping] - Cart items:", JSON.stringify(cartItems, null, 2));
+  console.log("[Shipping] - Cart token:", cartToken);
+
+  // Try custom endpoint first (faster, no session management needed)
+  if (AS_SHIPPING_API_KEY) {
+    try {
+      const result = await calculateShippingViaCustomEndpoint(cartItems, address);
+      console.log("[Shipping] Custom endpoint returned", result.methods.length, "methods:");
+      result.methods.forEach(m => console.log(`[Shipping]   - ${m.title}: £${m.cost}`));
+      return {
+        zone: null,
+        methods: result.methods,
+        packageInfo: result.packageInfo,
+      };
+    } catch (error) {
+      console.warn("[Shipping] Custom endpoint failed, falling back to Store API:", error.message);
+    }
+  }
+
+  // Fallback to Store API approach
+  return calculateShippingRates(address, cartItems, cartToken);
 };
