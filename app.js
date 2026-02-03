@@ -11,6 +11,7 @@ import filterRoutes from "./routes/filter.route.js";
 import menuRoute from "./routes/menu.route.js";
 import cartRoutes from "./routes/cart.route.js";
 import shippingRoutes from "./routes/shipping.route.js";
+import checkoutRoutes from "./routes/checkout.route.js";
 
 const app = express();
 
@@ -33,5 +34,6 @@ app.use("/api/variations", variationsRoutes);
 app.use("/api/filters", filterRoutes);
 app.use("/api/cart", cartRoutes);
 app.use("/api/shipping", shippingRoutes);
+app.use("/api/checkout", checkoutRoutes);
 
 export default app;
