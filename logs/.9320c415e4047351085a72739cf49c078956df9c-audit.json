@@ -1,0 +1,15 @@
+{
+    "keep": {
+        "days": true,
+        "amount": 7
+    },
+    "auditLog": "/Users/mertcankara/Desktop/apps/web/ecomm/backend/logs/.9320c415e4047351085a72739cf49c078956df9c-audit.json",
+    "files": [
+        {
+            "date": 1770118915608,
+            "name": "/Users/mertcankara/Desktop/apps/web/ecomm/backend/logs/requests-2026-02-03.log",
+            "hash": "a3cf821ea04cc7f1d50a588ba19ec7d321ebdd788f1ef5f3563d285e721ad8d9"
+        }
+    ],
+    "hashType": "sha256"
+}

@@ -10,6 +10,22 @@ import {
   confirmStripePaymentHandler,
 } from "../controllers/checkout.controller.js";
 
+// Rate limiters for checkout operations
+import {
+  placeOrderLimiter,
+  getOrderLimiter,
+  confirmOrderLimiter,
+  paymentGatewaysLimiter,
+} from "../sec/checkout-limiter.js";
+
+// Rate limiters for payment operations
+import {
+  stripeConfigLimiter,
+  createPaymentIntentLimiter,
+  confirmPaymentLimiter,
+  webhookLimiter,
+} from "../sec/payment-limiter.js";
+
 const router = express.Router();
 
 /**
@@ -17,7 +33,7 @@ const router = express.Router();
  * GET /api/checkout/payment-gateways
  * Headers: X-Cart-Token (required)
  */
-router.get("/payment-gateways", getPaymentGatewaysHandler);
+router.get("/payment-gateways", paymentGatewaysLimiter, getPaymentGatewaysHandler);
 
 /**
  * Place order and get payment redirect URL
@@ -53,21 +69,21 @@ router.get("/payment-gateways", getPaymentGatewaysHandler);
  *   }
  * }
  */
-router.post("/place-order", placeOrderHandler);
+router.post("/place-order", placeOrderLimiter, placeOrderHandler);
 
 /**
  * Get order details
  * GET /api/checkout/order/:orderId
  * Query: orderKey (optional, for guest orders)
  */
-router.get("/order/:orderId", getOrderHandler);
+router.get("/order/:orderId", getOrderLimiter, getOrderHandler);
 
 /**
  * Confirm order payment (after redirect from payment gateway)
  * POST /api/checkout/order/:orderId/confirm
  * Body: { orderKey: string }
  */
-router.post("/order/:orderId/confirm", confirmOrderHandler);
+router.post("/order/:orderId/confirm", confirmOrderLimiter, confirmOrderHandler);
 
 /**
  * Payment gateway webhook
@@ -75,7 +91,7 @@ router.post("/order/:orderId/confirm", confirmOrderHandler);
  * Note: WooCommerce handles most webhooks internally,
  * this is for custom integrations if needed
  */
-router.post("/webhook", webhookHandler);
+router.post("/webhook", webhookLimiter, webhookHandler);
 
 // ============================================
 // STRIPE PAYMENT ROUTES
@@ -85,7 +101,7 @@ router.post("/webhook", webhookHandler);
  * Get Stripe publishable key
  * GET /api/checkout/stripe/config
  */
-router.get("/stripe/config", getStripeConfigHandler);
+router.get("/stripe/config", stripeConfigLimiter, getStripeConfigHandler);
 
 /**
  * Create PaymentIntent for an order
@@ -98,13 +114,13 @@ router.get("/stripe/config", getStripeConfigHandler);
  *   customerEmail?: string
  * }
  */
-router.post("/stripe/create-payment-intent", createPaymentIntentHandler);
+router.post("/stripe/create-payment-intent", createPaymentIntentLimiter, createPaymentIntentHandler);
 
 /**
  * Confirm payment and update WooCommerce order
  * POST /api/checkout/stripe/confirm-payment
  * Body: { paymentIntentId: string }
  */
-router.post("/stripe/confirm-payment", confirmStripePaymentHandler);
+router.post("/stripe/confirm-payment", confirmPaymentLimiter, confirmStripePaymentHandler);
 
 export default router;

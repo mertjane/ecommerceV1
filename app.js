@@ -12,6 +12,9 @@ import menuRoute from "./routes/menu.route.js";
 import cartRoutes from "./routes/cart.route.js";
 import shippingRoutes from "./routes/shipping.route.js";
 import checkoutRoutes from "./routes/checkout.route.js";
+import logsRoutes from "./routes/logs.route.js";
+import sitemapRoutes from "./routes/sitemap.route.js";
+import { requestLoggerMiddleware, errorLoggerMiddleware } from "./middleware/requestLogger.js";
 
 const app = express();
 
@@ -22,7 +25,11 @@ app.use(cors({
 
 app.use(express.json());
 
+// Request logging middleware (before routes)
+app.use(requestLoggerMiddleware);
+
 // Routes
+app.use("/api/logs", logsRoutes);
 app.use("/api/menu", menuRoute);
 app.use("/api/products", productsRoutes);
 app.use("/api/search", searchRoutes);
@@ -35,5 +42,9 @@ app.use("/api/filters", filterRoutes);
 app.use("/api/cart", cartRoutes);
 app.use("/api/shipping", shippingRoutes);
 app.use("/api/checkout", checkoutRoutes);
+app.use("/api/sitemap", sitemapRoutes);
+
+// Error logging middleware (after all routes)
+app.use(errorLoggerMiddleware);
 
 export default app;

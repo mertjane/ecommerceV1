@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import app from "./app.js";
 import { cacheAllCategoriesOnStart, cachePopularProductsOnStart, fetchAllProducts } from "./services/products.service.js";
 import { cacheFilterOptionsOnStart } from "./services/filter.service.js";
+import { cacheMenuOnStart } from "./services/menu.service.js";
 import redisClient from "./config/redis.js"
 
 dotenv.config();
@@ -16,7 +17,8 @@ const runFullRefresh = async () => {
       fetchAllProducts(true),          // 'true' forces it to ignore old cache
       cacheFilterOptionsOnStart(true), // (Assuming you add forceRefresh to these too)
       cacheAllCategoriesOnStart(true),
-      cachePopularProductsOnStart(true)
+      cachePopularProductsOnStart(true),
+      cacheMenuOnStart(true),          // Megamenu cache (1 hour TTL)
     ]);
     console.log("All caches are now fresh!");
   } catch (err) {
