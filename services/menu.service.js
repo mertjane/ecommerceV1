@@ -31,7 +31,7 @@ export const fetchMenu = async (forceRefresh = false) => {
     if (!forceRefresh) {
       const cached = await redisClient.get(CACHE_KEY);
       if (cached) {
-        console.log("✓ [CACHE HIT] Serving megamenu from Redis");
+        console.log("[CACHE HIT] Serving megamenu from Redis");
         return {
           source: "cache",
           data: JSON.parse(cached),
@@ -40,12 +40,12 @@ export const fetchMenu = async (forceRefresh = false) => {
     }
 
     // 2. Fetch from WordPress
-    console.log("✗ [CACHE MISS] Fetching megamenu from WordPress API");
+    console.log("[CACHE MISS] Fetching megamenu from WordPress API");
     const menuData = await fetchMenuFromWordPress();
 
     // 3. Cache the result
     await redisClient.set(CACHE_KEY, JSON.stringify(menuData), "EX", CACHE_TTL);
-    console.log(`✓ [CACHED] Megamenu saved to Redis (TTL: ${CACHE_TTL}s)`);
+    console.log(`[CACHED] Megamenu saved to Redis (TTL: ${CACHE_TTL}s)`);
 
     return {
       source: "origin",
@@ -72,10 +72,10 @@ export const cacheMenuOnStart = async (forceRefresh = false) => {
       }
     }
 
-    console.log("🔥 [CACHE WARMING] Fetching megamenu...");
+    console.log("[CACHE WARMING] Fetching megamenu...");
     await fetchMenu(true);
-    console.log("✓ [CACHE WARMING] Megamenu cache ready!");
+    console.log("[CACHE WARMING] Megamenu cache ready!");
   } catch (error) {
-    console.error("✗ [CACHE WARMING] Failed to warm up megamenu cache:", error.message);
+    console.error("[CACHE WARMING] Failed to warm up megamenu cache:", error.message);
   }
 };

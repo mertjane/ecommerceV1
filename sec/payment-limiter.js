@@ -81,3 +81,68 @@ export const webhookLimiter = rateLimit({
     return req.headers["x-forwarded-for"]?.split(",")[0] || req.ip;
   },
 });
+
+// ============================================
+// PAYPAL RATE LIMITERS
+// ============================================
+
+/**
+ * Rate limiter for PayPal config retrieval
+ * Read-only endpoint, more permissive
+ * 30 requests per minute per IP
+ */
+export const paypalConfigLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30,
+  message: {
+    success: false,
+    message: "Too many requests. Please slow down.",
+    code: "RATE_LIMIT_EXCEEDED",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    return req.headers["x-forwarded-for"]?.split(",")[0] || req.ip;
+  },
+});
+
+/**
+ * Rate limiter for creating PayPal orders
+ * Business standard: Prevent payment fraud
+ * 10 PayPal order creations per 15 minutes per IP
+ */
+export const createPayPalOrderLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,
+  message: {
+    success: false,
+    message: "Too many payment attempts. Please try again in 15 minutes.",
+    code: "RATE_LIMIT_EXCEEDED",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: false,
+  keyGenerator: (req) => {
+    return req.headers["x-forwarded-for"]?.split(",")[0] || req.ip;
+  },
+});
+
+/**
+ * Rate limiter for capturing PayPal orders
+ * Slightly more permissive - may need retries on network issues
+ * 20 capture attempts per 15 minutes per IP
+ */
+export const capturePayPalOrderLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20,
+  message: {
+    success: false,
+    message: "Too many payment capture attempts. Please try again later.",
+    code: "RATE_LIMIT_EXCEEDED",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    return req.headers["x-forwarded-for"]?.split(",")[0] || req.ip;
+  },
+});

@@ -12,6 +12,12 @@ import {
   confirmPayment as confirmStripePayment,
   getPublishableKey,
 } from "../services/stripe.service.js";
+import {
+  createPayPalOrder,
+  capturePayPalOrder,
+  getPayPalOrder,
+  getClientId as getPayPalClientId,
+} from "../services/paypal.service.js";
 import { sendOrderConfirmationEmail } from "../services/email.service.js";
 import { successResponse, handleError } from "../utils/response.js";
 
@@ -401,13 +407,190 @@ export const confirmStripePaymentHandler = async (req, res) => {
   }
 };
 
+// ============================================
+// PAYPAL PAYMENT HANDLERS
+// ============================================
+
+/**
+ * Get PayPal client ID for frontend SDK
+ * GET /api/checkout/paypal/config
+ */
+export const getPayPalConfigHandler = async (req, res) => {
+  try {
+    const clientId = getPayPalClientId();
+
+    if (!clientId) {
+      return handleError(res, "PayPal is not configured", 500);
+    }
+
+    return successResponse(
+      res,
+      { clientId },
+      "PayPal configuration retrieved"
+    );
+  } catch (error) {
+    return handleError(res, "Failed to get PayPal configuration", 500);
+  }
+};
+
+/**
+ * Create PayPal order for payment
+ * POST /api/checkout/paypal/create-order
+ * Body: { orderId: number, orderKey: string, amount: number, currency?: string }
+ */
+export const createPayPalOrderHandler = async (req, res) => {
+  try {
+    const { orderId, orderKey, amount, currency } = req.body;
+
+    if (!orderId || !orderKey) {
+      return handleError(res, "Order ID and order key are required", 400);
+    }
+
+    if (!amount || amount <= 0) {
+      return handleError(res, "Valid amount is required", 400);
+    }
+
+    const result = await createPayPalOrder({
+      amount,
+      currency: currency || "GBP",
+      orderId,
+      orderKey,
+      description: `Order #${orderId}`,
+    });
+
+    return successResponse(
+      res,
+      {
+        paypalOrderId: result.paypalOrderId,
+        approvalUrl: result.approvalUrl,
+      },
+      "PayPal order created"
+    );
+  } catch (error) {
+    console.error("[PayPal] Create order error:", error);
+    return handleError(
+      res,
+      error.message || "Failed to create PayPal order",
+      error.status || 500
+    );
+  }
+};
+
+/**
+ * Capture PayPal order after customer approval
+ * POST /api/checkout/paypal/capture-order
+ * Body: { paypalOrderId: string }
+ */
+export const capturePayPalOrderHandler = async (req, res) => {
+  try {
+    const { paypalOrderId } = req.body;
+
+    if (!paypalOrderId) {
+      return handleError(res, "PayPal order ID is required", 400);
+    }
+
+    const captureResult = await capturePayPalOrder(paypalOrderId);
+
+    if (!captureResult.success) {
+      return handleError(res, "Failed to capture PayPal payment", 400);
+    }
+
+    // Update WooCommerce order status to processing
+    const { orderId, orderKey } = captureResult;
+
+    if (orderId) {
+      try {
+        await updateOrderStatus(orderId, "processing", {
+          paypalOrderId,
+          captureId: captureResult.captureId,
+          paymentMethod: "paypal",
+        });
+        console.log("[PayPal] Order", orderId, "marked as processing");
+
+        // Send order confirmation email to customer
+        const emailResult = await sendOrderConfirmationEmail(orderId);
+        if (emailResult.success) {
+          console.log("[PayPal] Order confirmation email sent for order", orderId);
+        } else {
+          console.warn("[PayPal] Failed to send order email:", emailResult.message);
+        }
+      } catch (updateError) {
+        console.error("[PayPal] Failed to update order status:", updateError.message);
+        // Don't fail the request - payment was successful
+      }
+    }
+
+    return successResponse(
+      res,
+      {
+        success: true,
+        orderId,
+        orderKey,
+        paypalOrderId: captureResult.paypalOrderId,
+        captureId: captureResult.captureId,
+        status: captureResult.status,
+      },
+      "PayPal payment captured successfully"
+    );
+  } catch (error) {
+    console.error("[PayPal] Capture order error:", error);
+    return handleError(
+      res,
+      error.message || "Failed to capture PayPal payment",
+      error.status || 500
+    );
+  }
+};
+
+/**
+ * Get PayPal order status
+ * GET /api/checkout/paypal/order/:paypalOrderId
+ */
+export const getPayPalOrderHandler = async (req, res) => {
+  try {
+    const { paypalOrderId } = req.params;
+
+    if (!paypalOrderId) {
+      return handleError(res, "PayPal order ID is required", 400);
+    }
+
+    const result = await getPayPalOrder(paypalOrderId);
+
+    return successResponse(
+      res,
+      {
+        paypalOrderId: result.paypalOrderId,
+        status: result.status,
+        orderId: result.orderId,
+        orderKey: result.orderKey,
+        amount: result.amount,
+        currency: result.currency,
+      },
+      "PayPal order retrieved"
+    );
+  } catch (error) {
+    console.error("[PayPal] Get order error:", error);
+    return handleError(
+      res,
+      error.message || "Failed to get PayPal order",
+      error.status || 500
+    );
+  }
+};
+
 export default {
   getPaymentGatewaysHandler,
   placeOrderHandler,
   getOrderHandler,
   confirmOrderHandler,
   webhookHandler,
+  // Stripe
   getStripeConfigHandler,
   createPaymentIntentHandler,
   confirmStripePaymentHandler,
+  // PayPal
+  getPayPalConfigHandler,
+  createPayPalOrderHandler,
+  capturePayPalOrderHandler,
+  getPayPalOrderHandler,
 };

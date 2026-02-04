@@ -5,9 +5,15 @@ import {
   getOrderHandler,
   confirmOrderHandler,
   webhookHandler,
+  // Stripe
   getStripeConfigHandler,
   createPaymentIntentHandler,
   confirmStripePaymentHandler,
+  // PayPal
+  getPayPalConfigHandler,
+  createPayPalOrderHandler,
+  capturePayPalOrderHandler,
+  getPayPalOrderHandler,
 } from "../controllers/checkout.controller.js";
 
 // Rate limiters for checkout operations
@@ -24,6 +30,10 @@ import {
   createPaymentIntentLimiter,
   confirmPaymentLimiter,
   webhookLimiter,
+  // PayPal
+  paypalConfigLimiter,
+  createPayPalOrderLimiter,
+  capturePayPalOrderLimiter,
 } from "../sec/payment-limiter.js";
 
 const router = express.Router();
@@ -122,5 +132,40 @@ router.post("/stripe/create-payment-intent", createPaymentIntentLimiter, createP
  * Body: { paymentIntentId: string }
  */
 router.post("/stripe/confirm-payment", confirmPaymentLimiter, confirmStripePaymentHandler);
+
+// ============================================
+// PAYPAL PAYMENT ROUTES
+// ============================================
+
+/**
+ * Get PayPal client ID for frontend SDK
+ * GET /api/checkout/paypal/config
+ */
+router.get("/paypal/config", paypalConfigLimiter, getPayPalConfigHandler);
+
+/**
+ * Create PayPal order for payment
+ * POST /api/checkout/paypal/create-order
+ * Body: {
+ *   orderId: number,
+ *   orderKey: string,
+ *   amount: number (in currency units, e.g., 10.99),
+ *   currency?: string (default: 'GBP')
+ * }
+ */
+router.post("/paypal/create-order", createPayPalOrderLimiter, createPayPalOrderHandler);
+
+/**
+ * Capture PayPal order after customer approval
+ * POST /api/checkout/paypal/capture-order
+ * Body: { paypalOrderId: string }
+ */
+router.post("/paypal/capture-order", capturePayPalOrderLimiter, capturePayPalOrderHandler);
+
+/**
+ * Get PayPal order status
+ * GET /api/checkout/paypal/order/:paypalOrderId
+ */
+router.get("/paypal/order/:paypalOrderId", paypalConfigLimiter, getPayPalOrderHandler);
 
 export default router;
